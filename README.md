@@ -9,7 +9,7 @@ An animated **Dynamic Island / Now Bar** for Windows 10 and 11, written in pure 
 
 > **Beta:** Features are tested in daily use. If you find a bug or have an idea, please open an issue.
 
-<p align="center"><img src="docs/demo.gif" alt="Atoll Island demo: idle clock, now playing, expanded player, word-by-word lyrics, volume, notification and a second media source" width="520"></p>
+<p align="center"><img src="docs/demo.gif" alt="Atoll Island demo: idle clock, now playing, expanded player, word-by-word lyrics, volume, notification, a second media source and the file shelf with clipboard history" width="520"></p>
 
 ## Screenshots
 
@@ -19,6 +19,7 @@ An animated **Dynamic Island / Now Bar** for Windows 10 and 11, written in pure 
 | <img src="docs/notification.png" alt="Notification" width="400"><br>**Notifications** | <img src="docs/call.png" alt="Incoming call card" width="400"><br>**Incoming call card** |
 | <img src="docs/two-sources.png" alt="Two media sources" width="400"><br>**Two sources** (main pill + bubble) | <img src="docs/volume.png" alt="Volume indicator" width="400"><br>**Volume** (replaces the Windows OSD) |
 | <img src="docs/idle.png" alt="Idle clock with weather" width="400"><br>**Idle** clock and weather | <img src="docs/downloads.png" alt="Download progress" width="400"><br>**Download progress** (Steam / browsers) |
+| <img src="docs/drop.png" alt="Drop files on the shelf" width="400"><br>**Drop files** onto the island | <img src="docs/shelf.png" alt="File shelf with clipboard history" width="400"><br>**Shelf + clipboard history** (files, screenshots, text) |
 
 <sub>Screenshots are rendered from the real UI with sample data; the track, artwork and messages are made up.</sub>
 
