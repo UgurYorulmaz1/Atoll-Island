@@ -1,0 +1,424 @@
+// Ayarlar: diske kaydedilir, degisince tum pencerelere "settings" olayi gider.
+use crate::util::{data_dir, emit};
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use std::sync::{Condvar, Mutex, OnceLock};
+use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(default, rename_all = "camelCase")]
+pub struct Settings {
+    pub lang: String,               // "tr" | "en"
+    pub browser_lyrics: bool,       // tarayicida sozler (YouTube Music her zaman acik)
+    pub clipboard_history: bool,    // Asama 3
+    pub storage: String,            // "disk" | "ram"  (Asama 3)
+    pub storage_dir: String,        // bos = varsayilan klasor
+    pub limit_gb: f64,              // raf boyut siniri
+    pub save_ram_on_exit: bool,
+    // Yeni ozellikler: hepsi VARSAYILAN KAPALI, sadece Ayarlar'dan acilir
+    pub show_sys_monitor: bool,     // canli sistem & oyun gostergesi (CPU/GPU/RAM/Ag)
+    pub headset_alerts: bool,       // kulaklik baglandi animasyonu + pil yuzdesi
+    pub privacy_dots: bool,         // mikrofon / kamera gizlilik noktalari
+    pub audio_switch: bool,         // hoparlor simgesine sag tik: ses cikisini degistir
+    pub auto_hide_fullscreen: bool, // tam ekran oyun/videoda otomatik gizle
+    pub global_shortcut: bool,      // Ctrl+Shift+Space ile adayi ac
+    pub single_source: bool,        // ayni anda tek ses kaynagi: yeni baslayan kazanir, digeri duraklar (varsayilan KAPALI)
+    pub island_size: String,        // "sm" | "md" | "lg" (varsayilan "md" = mevcut boyut)
+    pub monitor_index: usize,       // 0 = ana ekran, 1.. = diger ekranlar
+    pub recording_dot: bool,        // OBS / Xbox Game Bar kayit gostergesi (kirmizi nokta + sure)
+    pub listening_stats: bool,      // yerel calma gecmisi ve haftalik/gunluk ozet karti
+    pub call_alerts: bool,          // WhatsApp/Telegram/Teams gelen arama karti
+    pub weather: bool,              // hava durumu + yagis uyarisi (IP konumu)
+    pub downloads: bool,            // Steam / tarayici indirme ilerlemesi
+    pub spotify_autoplay: bool,     // Spotify aramadan calinca benzer sarkilari siraya ekle
+    pub easy_mode: bool,            // Basit Mod (varsayilan acik: sade ayarlar)
+    pub scale_mode: String,         // "auto" (Windows olceklemesine uyumlu) | "custom" (ayrik)
+    pub custom_scale: u32,          // 75..=115 (%) ayrik olcek
+    pub auto_dim: bool,             // bostayken hafif saydamlik (varsayilan kapali)
+    pub top_offset: u32,            // 0..=48 px ustten bosluk
+    pub idle_opacity: u32,          // 35..=100 (%) bosta saydamlik
+    pub bg_style: String,           // "pure" | "glass" | "tinted"
+    pub accent_color: String,       // "auto" veya "#rrggbb"
+    pub anim_speed: String,         // "snappy" | "normal" | "relaxed"
+    pub clock_24h: bool,            // 24 saat / 12 saat
+    pub gpu_accel: bool,            // WebView2 GPU rasterizasyon & donanim hizlandirma
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self { lang: default_lang(), browser_lyrics: false, clipboard_history: false, storage: "disk".into(),
+            storage_dir: String::new(), limit_gb: 16.0, save_ram_on_exit: true,
+            show_sys_monitor: false, headset_alerts: false, privacy_dots: false,
+            audio_switch: false, auto_hide_fullscreen: false, global_shortcut: false, single_source: false,
+            island_size: "md".into(), monitor_index: 0, recording_dot: false, listening_stats: false,
+            call_alerts: false, weather: false, downloads: false, spotify_autoplay: false,
+            easy_mode: true, scale_mode: "auto".into(), custom_scale: 100, auto_dim: false,
+            top_offset: 8, idle_opacity: 100, bg_style: "pure".into(), accent_color: "auto".into(),
+            anim_speed: "normal".into(), clock_24h: true, gpu_accel: true }
+    }
+}
+
+/// WebView2 baslatilmadan once (AppHandle hazir degilken) gpuAccel ayarini diskten okur
+pub fn gpu_accel_early() -> bool {
+    let Ok(appdata) = std::env::var("APPDATA") else { return true };
+    let folder = if crate::util::is_test() { "com.island.dynamic-test" } else { "com.island.dynamic" };
+    let p = std::path::PathBuf::from(appdata).join(folder).join("settings.json");
+    std::fs::read_to_string(p).ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .and_then(|v| v.get("gpuAccel").and_then(|b| b.as_bool()))
+        .unwrap_or(true)
+}
+
+static S: Mutex<Option<Settings>> = Mutex::new(None);
+static WAKE_SYNC: Condvar = Condvar::new();
+static WAKE_ASYNC: OnceLock<tokio::sync::Notify> = OnceLock::new();
+
+fn async_notify() -> &'static tokio::sync::Notify { WAKE_ASYNC.get_or_init(tokio::sync::Notify::new) }
+
+/// Ozellik kapaliyken is parcasini 0 CPU ile uyutur; ayar degisince aninda uyandirir
+pub fn wait_until<F: Fn(&Settings) -> bool>(pred: F) {
+    let mut g = S.lock().unwrap();
+    while !g.as_ref().map(&pred).unwrap_or(false) {
+        g = WAKE_SYNC.wait(g).unwrap();
+    }
+}
+
+/// Async gorevler icin 0 CPU bekleme
+pub async fn wait_until_async<F: Fn(&Settings) -> bool>(pred: F) {
+    loop {
+        if pred(&get()) { return; }
+        async_notify().notified().await;
+    }
+}
+
+/// Windows arayuz diline gore varsayilan dil kodu
+fn default_lang() -> String {
+    let id = unsafe { windows::Win32::Globalization::GetUserDefaultUILanguage() };
+    match id & 0x3FF {
+        0x1F => "tr",
+        0x07 => "de",
+        0x0C => "fr",
+        0x0A => "es",
+        0x10 => "it",
+        0x16 => "pt",
+        0x19 => "ru",
+        0x11 => "ja",
+        0x12 => "ko",
+        0x04 => "zh",
+        0x01 => "ar",
+        _ => "en",
+    }.into()
+}
+
+fn file() -> std::path::PathBuf { data_dir().join("settings.json") }
+
+pub fn init() {
+    let s: Settings = std::fs::read_to_string(file()).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+    *S.lock().unwrap() = Some(s);
+}
+
+pub fn get() -> Settings { S.lock().unwrap().clone().unwrap_or_default() }
+/// Iki dilli metin
+pub fn l<'a>(tr: &'a str, en: &'a str) -> &'a str { if get().lang == "tr" { tr } else { en } }
+
+/// Tum desteklenen 12 dil icin menu ve pencere metinleri
+pub fn tr(key: &str) -> &'static str {
+    let lang = get().lang;
+    match (lang.as_str(), key) {
+        ("tr", "settings") => "Ayarlar…",
+        ("de", "settings") => "Einstellungen…",
+        ("fr", "settings") => "Paramètres…",
+        ("es", "settings") => "Ajustes…",
+        ("it", "settings") => "Impostazioni…",
+        ("pt", "settings") => "Configurações…",
+        ("ru", "settings") => "Настройки…",
+        ("ar", "settings") => "الإعدادات…",
+        ("ja", "settings") => "設定…",
+        ("ko", "settings") => "설정…",
+        ("zh", "settings") => "设置…",
+        (_, "settings") => "Settings…",
+
+        ("tr", "autostart") => "Windows ile başlat",
+        ("de", "autostart") => "Mit Windows starten",
+        ("fr", "autostart") => "Lancer avec Windows",
+        ("es", "autostart") => "Iniciar con Windows",
+        ("it", "autostart") => "Avvia con Windows",
+        ("pt", "autostart") => "Iniciar com o Windows",
+        ("ru", "autostart") => "Запускать с Windows",
+        ("ar", "autostart") => "التشغيل مع Windows",
+        ("ja", "autostart") => "Windows 起動時に開始",
+        ("ko", "autostart") => "Windows 시작 시 실행",
+        ("zh", "autostart") => "开机自启动",
+        (_, "autostart") => "Start with Windows",
+
+        ("tr", "reload") => "Yeniden yükle",
+        ("de", "reload") => "Neu laden",
+        ("fr", "reload") => "Recharger",
+        ("es", "reload") => "Recargar",
+        ("it", "reload") => "Ricarica",
+        ("pt", "reload") => "Recarregar",
+        ("ru", "reload") => "Перезагрузить",
+        ("ar", "reload") => "إعادة تحميل",
+        ("ja", "reload") => "再読み込み",
+        ("ko", "reload") => "새로 고침",
+        ("zh", "reload") => "重新加载",
+        (_, "reload") => "Reload",
+
+        ("tr", "quit") => "Çıkış",
+        ("de", "quit") => "Beenden",
+        ("fr", "quit") => "Quitter",
+        ("es", "quit") => "Salir",
+        ("it", "quit") => "Esci",
+        ("pt", "quit") => "Sair",
+        ("ru", "quit") => "Выход",
+        ("ar", "quit") => "خروج",
+        ("ja", "quit") => "終了",
+        ("ko", "quit") => "종료",
+        ("zh", "quit") => "退出",
+        (_, "quit") => "Quit",
+
+        ("tr", "settings_title") => "Dynamic Island · Ayarlar",
+        ("de", "settings_title") => "Dynamic Island · Einstellungen",
+        ("fr", "settings_title") => "Dynamic Island · Paramètres",
+        ("es", "settings_title") => "Dynamic Island · Ajustes",
+        ("it", "settings_title") => "Dynamic Island · Impostazioni",
+        ("pt", "settings_title") => "Dynamic Island · Configurações",
+        ("ru", "settings_title") => "Dynamic Island · Настройки",
+        ("ar", "settings_title") => "Dynamic Island · الإعدادات",
+        ("ja", "settings_title") => "Dynamic Island · 設定",
+        ("ko", "settings_title") => "Dynamic Island · 설정",
+        ("zh", "settings_title") => "Dynamic Island · 设置",
+        (_, "settings_title") => "Dynamic Island · Settings",
+
+        ("tr", "sh_open") => "Aç",
+        ("de", "sh_open") => "Öffnen",
+        ("fr", "sh_open") => "Ouvrir",
+        ("es", "sh_open") => "Abrir",
+        ("it", "sh_open") => "Apri",
+        ("pt", "sh_open") => "Abrir",
+        ("ru", "sh_open") => "Открыть",
+        ("ar", "sh_open") => "فتح",
+        ("ja", "sh_open") => "開く",
+        ("ko", "sh_open") => "열기",
+        ("zh", "sh_open") => "打开",
+        (_, "sh_open") => "Open",
+
+        ("tr", "sh_copy") => "Panoya kopyala",
+        ("de", "sh_copy") => "In Zwischenablage kopieren",
+        ("fr", "sh_copy") => "Copier dans le presse-papiers",
+        ("es", "sh_copy") => "Copiar al portapapeles",
+        ("it", "sh_copy") => "Copia negli appunti",
+        ("pt", "sh_copy") => "Copiar para área de transferência",
+        ("ru", "sh_copy") => "Копировать в буфер",
+        ("ar", "sh_copy") => "نسخ إلى الحافظة",
+        ("ja", "sh_copy") => "クリップボードにコピー",
+        ("ko", "sh_copy") => "클립보드에 복사",
+        ("zh", "sh_copy") => "复制到剪贴板",
+        (_, "sh_copy") => "Copy to clipboard",
+
+        ("tr", "sh_orig") => "Orijinal konumunu göster",
+        ("de", "sh_orig") => "Ursprungsort anzeigen",
+        ("fr", "sh_orig") => "Afficher l'emplacement d'origine",
+        ("es", "sh_orig") => "Mostrar ubicación original",
+        ("it", "sh_orig") => "Mostra posizione originale",
+        ("pt", "sh_orig") => "Mostrar local original",
+        ("ru", "sh_orig") => "Показать исходное расположение",
+        ("ar", "sh_orig") => "إظهار الموقع الأصلي",
+        ("ja", "sh_orig") => "元の場所を表示",
+        ("ko", "sh_orig") => "원래 위치 표시",
+        ("zh", "sh_orig") => "显示原始位置",
+        (_, "sh_orig") => "Show original location",
+
+        ("tr", "sh_remove") => "Raftan kaldır",
+        ("de", "sh_remove") => "Aus Ablage entfernen",
+        ("fr", "sh_remove") => "Retirer de l'étagère",
+        ("es", "sh_remove") => "Quitar del estante",
+        ("it", "sh_remove") => "Rimuovi dallo scaffale",
+        ("pt", "sh_remove") => "Remover da prateleira",
+        ("ru", "sh_remove") => "Убрать с полки",
+        ("ar", "sh_remove") => "إزالة من الرف",
+        ("ja", "sh_remove") => "シェルフから削除",
+        ("ko", "sh_remove") => "선반에서 제거",
+        ("zh", "sh_remove") => "从暂存架移除",
+        (_, "sh_remove") => "Remove from shelf",
+
+        _ => "",
+    }
+}
+
+fn save(s: &Settings) {
+    let _ = std::fs::write(file(), serde_json::to_string_pretty(s).unwrap_or_default());
+    *S.lock().unwrap() = Some(s.clone());
+    WAKE_SYNC.notify_all();
+    async_notify().notify_waiters();
+}
+
+/// Ayarlar + ayar sayfasinin gosterdigi diger durumlar
+pub fn snapshot() -> Value {
+    let mut v = serde_json::to_value(get()).unwrap_or(json!({}));
+    v["autostart"] = json!(crate::winutil::autostart_enabled());
+    v["clientId"] = json!(crate::spotify::client_id());
+    v["spotifyConnected"] = json!(crate::spotify::is_connected());
+    v["dataDir"] = json!(data_dir().display().to_string());
+    v["defaultStorageDir"] = json!(data_dir().join("shelf-cache").display().to_string());
+    v["ramTotalGb"] = json!((crate::shellx::total_ram() as f64 / 1073741824.0 * 10.0).round() / 10.0);
+    v["ramLimitGb"] = json!((crate::shelf::ram_limit_bytes() as f64 / 1073741824.0 * 10.0).round() / 10.0);
+    v["usedBytes"] = json!(crate::shelf::used_bytes());
+    v["monitors"] = json!(crate::winutil::list_monitors());
+    v
+}
+
+/// Raf kullanimi degisince ayar sayfasini guncelle (tepsiyi yeniden kurmadan)
+pub fn broadcast_usage() { emit("settings", snapshot()); }
+
+pub fn broadcast() {
+    emit("settings", snapshot());
+    crate::rebuild_tray();
+    if let Some(w) = crate::util::app().get_webview_window("settings") {
+        let _ = w.set_title(tr("settings_title"));
+    }
+}
+
+#[tauri::command]
+pub fn get_settings() -> Value { snapshot() }
+
+#[tauri::command]
+pub fn set_setting(key: String, value: Value) -> Result<Value, String> {
+    let mut s = get();
+    match key.as_str() {
+        "lang" => {
+            let v = value.as_str().unwrap_or("");
+            if !matches!(v, "tr" | "en" | "de" | "fr" | "es" | "it" | "pt" | "ru" | "ja" | "ko" | "zh" | "ar") {
+                return Err("bad lang".into());
+            }
+            s.lang = v.into();
+        }
+        "browserLyrics" => s.browser_lyrics = value.as_bool().ok_or("bool")?,
+        "clipboardHistory" => s.clipboard_history = value.as_bool().ok_or("bool")?,
+        "saveRamOnExit" => s.save_ram_on_exit = value.as_bool().ok_or("bool")?,
+        "showSysMonitor" => s.show_sys_monitor = value.as_bool().ok_or("bool")?,
+        "headsetAlerts" => s.headset_alerts = value.as_bool().ok_or("bool")?,
+        "privacyDots" => s.privacy_dots = value.as_bool().ok_or("bool")?,
+        "audioSwitch" => s.audio_switch = value.as_bool().ok_or("bool")?,
+        "autoHideFullscreen" => s.auto_hide_fullscreen = value.as_bool().ok_or("bool")?,
+        "globalShortcut" => s.global_shortcut = value.as_bool().ok_or("bool")?,
+        "singleSource" => s.single_source = value.as_bool().ok_or("bool")?,
+        "recordingDot" => s.recording_dot = value.as_bool().ok_or("bool")?,
+        "listeningStats" => s.listening_stats = value.as_bool().ok_or("bool")?,
+        "callAlerts" => s.call_alerts = value.as_bool().ok_or("bool")?,
+        "weather" => s.weather = value.as_bool().ok_or("bool")?,
+        "downloads" => s.downloads = value.as_bool().ok_or("bool")?,
+        "spotifyAutoplay" => s.spotify_autoplay = value.as_bool().ok_or("bool")?,
+        "easyMode" => s.easy_mode = value.as_bool().ok_or("bool")?,
+        "scaleMode" => {
+            let v = value.as_str().unwrap_or("");
+            if !matches!(v, "auto" | "custom") { return Err("bad scaleMode".into()); }
+            s.scale_mode = v.into();
+        }
+        "customScale" => {
+            let v = value.as_u64().ok_or("number")? as u32;
+            if !(75..=115).contains(&v) { return Err("bad scale".into()); }
+            s.custom_scale = v;
+        }
+        "autoDim" => s.auto_dim = value.as_bool().ok_or("bool")?,
+        "topOffset" => {
+            let v = value.as_u64().ok_or("number")? as u32;
+            if v > 48 { return Err("bad offset".into()); }
+            s.top_offset = v;
+        }
+        "idleOpacity" => {
+            let v = value.as_u64().ok_or("number")? as u32;
+            if !(35..=100).contains(&v) { return Err("bad opacity".into()); }
+            s.idle_opacity = v;
+        }
+        "bgStyle" => {
+            let v = value.as_str().unwrap_or("");
+            if !matches!(v, "pure" | "glass" | "tinted") { return Err("bad bgStyle".into()); }
+            s.bg_style = v.into();
+        }
+        "accentColor" => {
+            let v = value.as_str().unwrap_or("");
+            let valid_hex = v.len() == 7 && v.starts_with('#') && v[1..].chars().all(|c| c.is_ascii_hexdigit());
+            if v != "auto" && !valid_hex { return Err("bad color".into()); }
+            s.accent_color = v.into();
+        }
+        "animSpeed" => {
+            let v = value.as_str().unwrap_or("");
+            if !matches!(v, "snappy" | "normal" | "relaxed") { return Err("bad speed".into()); }
+            s.anim_speed = v.into();
+        }
+        "clock24h" => s.clock_24h = value.as_bool().ok_or("bool")?,
+        "gpuAccel" => s.gpu_accel = value.as_bool().ok_or("bool")?,
+        "resetCustom" => {
+            s.island_size = "md".into();
+            s.scale_mode = "auto".into();
+            s.custom_scale = 100;
+            s.auto_dim = false;
+            s.top_offset = 8;
+            s.idle_opacity = 100;
+            s.bg_style = "pure".into();
+            s.accent_color = "auto".into();
+            s.anim_speed = "normal".into();
+            s.clock_24h = true;
+        }
+        "islandSize" => {
+            let v = value.as_str().unwrap_or("");
+            if !matches!(v, "sm" | "md" | "lg") { return Err("bad size".into()); }
+            s.island_size = v.into();
+        }
+        "monitorIndex" => {
+            let v = value.as_u64().ok_or("number")? as usize;
+            s.monitor_index = v;
+            save(&s);
+            crate::winutil::place_now();
+            broadcast();
+            return Ok(snapshot());
+        }
+        "storage" => {
+            let v = value.as_str().unwrap_or("");
+            if v != "disk" && v != "ram" { return Err("bad storage".into()); }
+            s.storage = v.into();
+        }
+        "limitGb" => {
+            let v = value.as_f64().ok_or("number")?;
+            if !(0.5..=1024.0).contains(&v) { return Err("bad limit".into()); }
+            s.limit_gb = v;
+        }
+        "storageDir" => {
+            let v = value.as_str().unwrap_or("").trim().to_string();
+            if !v.is_empty() && !std::path::Path::new(&v).is_dir() { return Err("folder not found".into()); }
+            s.storage_dir = v;
+        }
+        "autostart" => { crate::winutil::set_autostart(value.as_bool().ok_or("bool")?); }
+        "clientId" => {
+            let v = value.as_str().unwrap_or("").trim().to_string();
+            if v.len() != 32 || !v.chars().all(|c| c.is_ascii_hexdigit()) { return Err("Client ID 32 karakterlik bir kod olmalı".into()); }
+            crate::spotify::set_client_id(&v);
+        }
+        _ => return Err("unknown key".into()),
+    }
+    save(&s);
+    broadcast();
+    Ok(snapshot())
+}
+
+#[tauri::command]
+pub async fn open_settings(app: AppHandle) { show_window(&app); }
+
+/// Windows'ta pencereyi senkron komut/olay icinde olusturmak ana donguyu kilitler: arka plan gorevinde olustur
+pub fn show_window(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window("settings") {
+        let _ = w.unminimize(); let _ = w.show(); let _ = w.set_focus();
+        return;
+    }
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let _ = WebviewWindowBuilder::new(&app, "settings", WebviewUrl::App("settings.html".into()))
+            .title(tr("settings_title"))
+            .inner_size(560.0, 790.0)
+            .resizable(false)
+            .maximizable(false)
+            .center()
+            .build();
+    });
+}

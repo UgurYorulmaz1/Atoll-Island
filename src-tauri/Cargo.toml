@@ -1,0 +1,45 @@
+[package]
+name = "island"
+version = "0.1.0"
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+reqwest = { version = "0.12", features = ["json"] }
+tokio = { version = "1", features = ["time", "sync"] }
+base64 = "0.22"
+sha2 = "0.10"
+rand = "0.8"
+png = "0.17"
+winreg = "0.55"
+url = "2"
+windows-future = "0.3"
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+[dependencies.windows]
+version = "0.62"
+features = [
+  "Foundation", "Foundation_Collections", "Media", "Media_Control", "Storage_Streams",
+  "UI_Notifications", "UI_Notifications_Management", "ApplicationModel",
+  "Devices_Enumeration",
+  "Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Variant",
+  "Win32_Media_Audio", "Win32_Media_Audio_Endpoints", "Win32_System_LibraryLoader",
+  "Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_UI_Shell_PropertiesSystem", "Win32_System_Ole", "Win32_System_DataExchange",
+  "Win32_Graphics_Gdi", "Win32_System_Memory", "Win32_System_Threading", "Win32_UI_HiDpi",
+  "Win32_System_SystemServices", "Win32_System_SystemInformation", "Win32_Security", "Win32_UI_Accessibility", "Win32_Globalization", "Devices_Bluetooth", "Devices_Bluetooth_Rfcomm", "Devices_Enumeration", "Networking", "Networking_Sockets",
+  "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis",
+  "Win32_Devices_DeviceAndDriverInstallation", "Win32_Devices_Properties",
+]
+
+[profile.release]
+opt-level = "s"
+lto = "thin"
+codegen-units = 16
+strip = true

@@ -1,0 +1,7 @@
+/src-tauri/target/
+/src-tauri/gen/
+/src-tauri/.cargo/
+*.pdb
+*.exe
+.DS_Store
+Thumbs.db
