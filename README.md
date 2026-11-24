@@ -27,7 +27,7 @@ An animated **Dynamic Island / Now Bar** for Windows 10 and 11, written in pure 
 ## Installation
 
 ### 1. MSI installer (recommended)
-Download the latest `.msi` installer (`en-US` or `tr-TR`) from the [Releases](../../releases/latest) page and run it.
+Download the latest `.msi` installer (`en-US` or `tr-TR`) from the [Releases](../../releases) page and run it.
 - Creates a Start Menu shortcut and an Add/Remove Programs entry.
 - Installs WebView2 automatically if it is missing (it ships with Windows 11).
 
