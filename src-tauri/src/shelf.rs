@@ -1,8 +1,8 @@
-// Raf (dosya tepsisi)
-// - Birakilan dosya/klasorler ANINDA kopyalanir: diske (varsayilan, klasor secilebilir) ya da RAM'e (Ayarlar).
-// - RAM'deki oge disari verilirken (surukle, kopyala, ac) gecici klasore bir kez yazilir.
-// - Toplam boyut siniri (varsayilan 16 GB); RAM modu sistem RAM'inin yarisini asamaz.
-// - Pano gecmisi (istege bagli): kopyalanan dosya, resim ve metinler rafa duser (sifre yoneticileri haric).
+// Shelf (file tray)
+// - Dropped files/folders are copied IMMEDIATELY: to disk (default, folder selectable) or to RAM (Settings).
+// - A RAM item is written to a temp folder once when it is exported (drag out, copy, open).
+// - Total size limit (default 16 GB); RAM mode cannot exceed half of system RAM.
+// - Clipboard history (optional): copied files, images and text land on the shelf (password managers excluded).
 use crate::settings::{self, l};
 use crate::util::{data_dir, emit, show_in_folder, shell_open};
 use serde::{Deserialize, Serialize};
@@ -20,27 +20,27 @@ use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
 const MAX_ITEMS: usize = 60;
 const GB: f64 = 1024.0 * 1024.0 * 1024.0;
 
-/// RAM'de tutulan icerik: tek dosya ya da klasor agaci (goreli yol, veri)
+/// Content kept in RAM: a single file or a folder tree (relative path, data)
 enum Blob { File(Vec<u8>), Dir(Vec<(PathBuf, Vec<u8>)>) }
 
 #[derive(Serialize, Deserialize, Clone)]
 struct Item {
     id: String,
     name: String,
-    #[serde(default)] path: String,        // diskteki kopya (RAM ogesinde bos)
+    #[serde(default)] path: String,        // copy on disk (empty for RAM items)
     #[serde(default)] orig: String,
     #[serde(default = "kind_file")] kind: String,   // file | dir | text | image
     #[serde(default)] size: u64,
-    #[serde(default)] text: String,        // metin kartlari icin onizleme
+    #[serde(default)] text: String,        // preview for text cards
     #[serde(skip)] copying: bool,
     #[serde(skip)] ram: Option<Arc<Blob>>,
 }
 fn kind_file() -> String { "file".into() }
 
 static ITEMS: Mutex<Vec<Item>> = Mutex::new(Vec::new());
-static ICONS: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);     // oge kimligi -> simge
-static EXPORTED: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);  // RAM ogesi -> gecici dosya
-static IGNORE_SEQ: AtomicU32 = AtomicU32::new(0);                            // kendi pano yazmalarimiz
+static ICONS: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);     // item id -> icon
+static EXPORTED: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);  // RAM item -> temp file
+static IGNORE_SEQ: AtomicU32 = AtomicU32::new(0);                            // our own clipboard writes
 
 fn default_root() -> PathBuf { data_dir().join("shelf-cache") }
 fn root() -> PathBuf {
@@ -72,7 +72,7 @@ pub fn init() {
     let items: Vec<Item> = std::fs::read_to_string(list_file()).ok()
         .and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
     let items: Vec<Item> = items.into_iter().filter(|x| exists(&x.path)).collect();
-    // varsayilan onbellekte listede olmayan artiklari temizle
+    // clean up leftovers in the default cache that are not in the list
     if let Ok(rd) = std::fs::read_dir(default_root()) {
         for e in rd.flatten() {
             let n = e.file_name().to_string_lossy().to_string();
@@ -86,7 +86,7 @@ pub fn init() {
     start_clipboard_watch();
 }
 
-/// Kapanista: istenirse RAM'deki ogeleri diske yaz (bir sonraki acilista rafta olsunlar)
+/// On exit: optionally write RAM items to disk (so they are on the shelf next launch)
 pub fn on_exit() {
     let save_ram = settings::get().save_ram_on_exit;
     let mut g = ITEMS.lock().unwrap();
@@ -102,7 +102,7 @@ pub fn on_exit() {
     let _ = std::fs::remove_dir_all(export_root());
 }
 
-/* ---------- disari verme ---------- */
+/* ---------- export ---------- */
 fn write_blob(blob: &Blob, dest: &Path) -> std::io::Result<()> {
     match blob {
         Blob::File(b) => { if let Some(p) = dest.parent() { std::fs::create_dir_all(p)?; } std::fs::write(dest, b) }
@@ -118,7 +118,7 @@ fn write_blob(blob: &Blob, dest: &Path) -> std::io::Result<()> {
     }
 }
 
-/// Ogenin diskteki yolu; RAM ogesiyse gecici klasore (bir kez) yazar
+/// Item's path on disk; for a RAM item, writes it (once) to the temp folder
 fn export_path(x: &Item) -> Option<String> {
     if x.copying { return None; }
     let Some(blob) = &x.ram else { return if exists(&x.path) { Some(x.path.clone()) } else { None } };
@@ -137,13 +137,13 @@ fn items_by_ids(ids: &[String]) -> Vec<Item> {
 }
 fn ready_paths(ids: &[String]) -> Vec<String> { items_by_ids(ids).iter().filter_map(export_path).collect() }
 
-/* ---------- arayuze gonder ---------- */
+/* ---------- send to UI ---------- */
 fn send() {
     std::thread::spawn(|| {
         unsafe { let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED); }
         let items = {
             let mut g = ITEMS.lock().unwrap();
-            g.retain(alive);   // disari TASINAN disk ogelerini dusur
+            g.retain(alive);   // drop disk items that were MOVED out
             save(&g);
             g.clone()
         };
@@ -164,7 +164,7 @@ fn send() {
     });
 }
 
-/* ---------- ekleme ---------- */
+/* ---------- adding ---------- */
 fn dir_size(p: &Path) -> u64 {
     if p.is_file() { return std::fs::metadata(p).map(|m| m.len()).unwrap_or(0); }
     std::fs::read_dir(p).map(|rd| rd.flatten().map(|e| dir_size(&e.path())).sum()).unwrap_or(0)
@@ -213,7 +213,7 @@ fn drop_item_files(x: &Item) {
 fn add_paths(paths: Vec<String>) {
     let s = settings::get();
     for p in paths {
-        let p = p.replace('/', "\\");   // kabuk API'leri (simge) ters bolu ister
+        let p = p.replace('/', "\\");   // shell APIs (icons) need backslashes
         let pb = PathBuf::from(&p);
         if !pb.is_absolute() || !pb.exists() || is_ours(&p) { continue; }
         let is_dir = pb.is_dir();
@@ -230,7 +230,7 @@ fn add_paths(paths: Vec<String>) {
         let id = new_id();
         let name = pb.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| p.clone());
         let dest = if use_ram { String::new() } else { root().join(&id).join(&name).to_string_lossy().to_string() };
-        // simgeyi orijinalden simdi al (RAM ogesinin diskte dosyasi yok)
+        // grab the icon from the original now (a RAM item has no file on disk)
         let item = Item { id: id.clone(), name, path: dest.clone(), orig: p.clone(), kind: if is_dir { "dir".into() } else { "file".into() },
             size, text: String::new(), copying: true, ram: None };
         ITEMS.lock().unwrap().push(item);
@@ -259,7 +259,7 @@ fn add_paths(paths: Vec<String>) {
     send();
 }
 
-/// Uretilen icerik (pano resmi / metni): ayara gore RAM'e ya da diske
+/// Generated content (clipboard image / text): to RAM or disk depending on the setting
 fn add_generated(name: String, kind: &str, bytes: Vec<u8>, text: String) {
     let size = bytes.len() as u64;
     if used_bytes() + size > limit_bytes() { msg(l("Raf sınırı aşılıyor", "Shelf limit exceeded")); return; }
@@ -274,7 +274,7 @@ fn add_generated(name: String, kind: &str, bytes: Vec<u8>, text: String) {
         item.path = p.to_string_lossy().to_string();
     }
     if kind == "image" {
-        // kucuk resmi RAM'deki veriden de gosterebilmek icin simgeyi simdi hazirla
+        // prepare the icon now so the thumbnail can also be shown from RAM data
         if let Some(path) = export_path(&item) {
             let id2 = id.clone();
             std::thread::spawn(move || {
@@ -294,11 +294,11 @@ fn stamp() -> String {
     format!("{:02}.{:02}.{:02}", st.wHour, st.wMinute, st.wSecond)
 }
 fn add_text(text: String) {
-    // ayni metin zaten son ogeyse tekrar ekleme
+    // do not add the same text again if it is already the latest item
     if ITEMS.lock().unwrap().last().map(|x| x.kind == "text" && x.text == preview(&text)).unwrap_or(false) { return; }
     let name = format!("{} {}.txt", l("Metin", "Text"), stamp());
     let pv = preview(&text);
-    let mut bytes = vec![0xEF, 0xBB, 0xBF]; bytes.extend_from_slice(text.as_bytes());   // Not Defteri icin UTF-8 BOM
+    let mut bytes = vec![0xEF, 0xBB, 0xBF]; bytes.extend_from_slice(text.as_bytes());   // UTF-8 BOM for Notepad
     add_generated(name, "text", bytes, pv);
 }
 fn preview(t: &str) -> String { t.trim().chars().take(160).collect() }
@@ -309,7 +309,7 @@ fn remove(id: &str) {
     if let Some(pos) = g.iter().position(|x| x.id == id) { let x = g.remove(pos); drop(g); drop_item_files(&x); }
 }
 
-/* ---------- pano gecmisi ---------- */
+/* ---------- clipboard history ---------- */
 fn start_clipboard_watch() {
     std::thread::spawn(|| {
         let mut last = crate::shellx::clipboard_seq();
@@ -323,7 +323,7 @@ fn start_clipboard_watch() {
             if seq == last { continue; }
             last = seq;
             if !settings::get().clipboard_history || seq == IGNORE_SEQ.load(Ordering::Relaxed) { continue; }
-            if crate::shellx::clipboard_is_private() { continue; }   // sifre yoneticileri vb.
+            if crate::shellx::clipboard_is_private() { continue; }   // password managers etc.
             match crate::shellx::clipboard_read() {
                 crate::shellx::ClipContent::Files(f) => add_paths(f),
                 crate::shellx::ClipContent::Png(png) => add_png(png),
@@ -334,11 +334,11 @@ fn start_clipboard_watch() {
     });
 }
 
-/// Rafin kendi pano yazmalari gecmise geri dusmesin
+/// Keep the shelf's own clipboard writes out of the history
 fn mark_own_clipboard() { IGNORE_SEQ.store(crate::shellx::clipboard_seq(), Ordering::Relaxed); }
 
 fn copy_items(items: Vec<Item>) {
-    // tek metin kartiysa metin olarak, digerleri dosya olarak
+    // a single text card as text, everything else as files
     if items.len() == 1 && items[0].kind == "text" {
         let x = &items[0];
         let full = export_path(x).and_then(|p| std::fs::read_to_string(p).ok()).map(|s| s.trim_start_matches('\u{feff}').to_string());
@@ -352,7 +352,7 @@ fn copy_items(items: Vec<Item>) {
     });
 }
 
-/* ---------- komutlar ---------- */
+/* ---------- commands ---------- */
 #[tauri::command] pub fn shelf_get() { send(); }
 #[tauri::command] pub fn shelf_add(paths: Vec<String>) { std::thread::spawn(move || add_paths(paths)); }
 #[tauri::command] pub fn shelf_remove(id: String) { remove(&id); send(); }
@@ -367,7 +367,7 @@ fn copy_items(items: Vec<Item>) {
 
 #[tauri::command]
 pub fn shelf_drag(window: WebviewWindow, ids: Vec<String>) {
-    // RAM ogeleri once gecici dosyaya yazilir (cogu hedef disk dosyasi ister)
+    // RAM items are written to temp files first (most targets expect files on disk)
     let files = ready_paths(&ids);
     if files.is_empty() { return; }
     let hwnd = window.hwnd().map(|h| h.0 as isize).unwrap_or(0);
@@ -393,7 +393,7 @@ pub fn shelf_paste() {
     });
 }
 
-/* ---------- sag tik menusu ---------- */
+/* ---------- right-click menu ---------- */
 #[tauri::command]
 pub fn shelf_menu(window: WebviewWindow, id: String) -> Result<(), String> {
     let app = window.app_handle();
@@ -423,7 +423,7 @@ pub fn on_menu(id: &str) {
     }
 }
 
-/* ---------- ayarlar icin ---------- */
+/* ---------- for Settings ---------- */
 #[tauri::command]
 pub async fn pick_storage_dir() -> Result<serde_json::Value, String> {
     let title = l("Raf dosyalarının kaydedileceği klasör", "Folder for shelf files").to_string();

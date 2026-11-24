@@ -1,6 +1,6 @@
-// Canli Sistem & Oyun Gostergesi (CPU / GPU / RAM / Indirme Hizi),
-// Mikrofon & Kamera Gizlilik Noktasi (ConsentStore),
-// Bluetooth & Kulaklik Baglandi Animasyonu + Pil Yuzdesi (SetupAPI DEVPKEY_Bluetooth_Battery).
+// Live system & gaming monitor (CPU / GPU / RAM / download speed),
+// microphone & camera privacy dot (ConsentStore),
+// Bluetooth & headphones-connected animation + battery percentage (SetupAPI DEVPKEY_Bluetooth_Battery).
 use crate::util::emit;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -52,7 +52,7 @@ fn cpu_times() -> (u64, u64, u64) {
     }
 }
 
-/// (kullanilan_ram_yuzde, kullanilan_gb, toplam_gb)
+/// (used_ram_percent, used_gb, total_gb)
 fn ram_usage() -> (u32, f64, f64) {
     unsafe {
         let mut m = MEMORYSTATUSEX {
@@ -69,7 +69,7 @@ fn ram_usage() -> (u32, f64, f64) {
     }
 }
 
-/// Toplam gelen/giden ag bayti (loopback haric aktif arayuzler)
+/// Total received/sent network bytes (active interfaces, excluding loopback)
 fn net_bytes() -> (u64, u64) {
     unsafe {
         let mut table: *mut MIB_IF_TABLE2 = std::ptr::null_mut();
@@ -91,7 +91,7 @@ fn net_bytes() -> (u64, u64) {
     }
 }
 
-/// NVIDIA GPU sicaklik (C) ve kullanim (%)
+/// NVIDIA GPU temperature (C) and load (%)
 fn query_gpu() -> Option<(u32, u32)> {
     let out = std::process::Command::new("nvidia-smi")
         .args(["--query-gpu=temperature.gpu,utilization.gpu", "--format=csv,noheader,nounits"])
@@ -107,7 +107,7 @@ fn query_gpu() -> Option<(u32, u32)> {
     Some((temp.round() as u32, util.round() as u32))
 }
 
-/// Mikrofon veya kamerayi su an kullanan uygulamalari bulur (Windows ConsentStore)
+/// Finds the apps currently using the microphone or camera (Windows ConsentStore)
 fn check_privacy_store(kind: &str) -> Vec<String> {
     let mut active = Vec::new();
     let hkcu = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER);
@@ -144,8 +144,8 @@ fn check_privacy_store(kind: &str) -> Vec<String> {
     active
 }
 
-/// OBS, Xbox Game Bar veya diger ekran kaydediciler su an aktif bir video kaydi yapiyor mu?
-/// Son 4 saniye icinde boyut/yazim zamani degisen .mp4/.mkv/.flv/.mov/.ts/.avi dosyasi veya aktif kayit durumu varsa (UygulamaAdi, SureSn) dondurur.
+/// Is OBS, Xbox Game Bar or another screen recorder recording video right now?
+/// Returns (AppName, Secs) if an .mp4/.mkv/.flv/.mov/.ts/.avi file changed size/write time in the last 4 seconds or a recording state is active.
 fn detect_active_recording() -> Option<(String, u64)> {
     let mut dirs: Vec<std::path::PathBuf> = Vec::new();
     if let Ok(up) = std::env::var("USERPROFILE") {
@@ -153,7 +153,7 @@ fn detect_active_recording() -> Option<(String, u64)> {
         dirs.push(v.join("Captures"));
         dirs.push(v.clone());
     }
-    // OBS global.ini -> aktif profil -> basic.ini icindeki FilePath / RecFilePath
+    // OBS global.ini -> active profile -> FilePath / RecFilePath in basic.ini
     if let Ok(ap) = std::env::var("APPDATA") {
         let obs_base = std::path::PathBuf::from(&ap).join("obs-studio").join("basic").join("profiles");
         if let Ok(rd) = std::fs::read_dir(&obs_base) {
@@ -187,7 +187,7 @@ fn detect_active_recording() -> Option<(String, u64)> {
             if meta.len() < 1024 { continue; }
             let Ok(mtime) = meta.modified() else { continue };
             let Ok(age) = now.duration_since(mtime) else { continue };
-            // Son 4.5 sn icinde diske yazilmissa su an canli kayit yapiliyor demektir
+            // written to disk within the last 4.5 s means a recording is live
             if age.as_secs_f64() <= 4.5 {
                 let dur = meta.created().ok()
                     .and_then(|c| now.duration_since(c).ok())
@@ -200,7 +200,7 @@ fn detect_active_recording() -> Option<(String, u64)> {
         }
     }
 
-    // Ek olarak Xbox Game Bar Broadcast/DVR kayit anahtari
+    // additionally the Xbox Game Bar Broadcast/DVR recording key
     let hkcu = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER);
     if let Ok(k) = hkcu.open_subkey(r"System\GameConfigStore") {
         let dvr: u32 = k.get_value("GameDVR_DVR LetUserRecord").unwrap_or(0);
@@ -209,14 +209,14 @@ fn detect_active_recording() -> Option<(String, u64)> {
     None
 }
 
-/// Bluetooth ve kulaklik cihazlarinin pil yuzdesini ve baglanti durumunu dogrudan SetupAPI ile okur
+/// Reads battery level and connection state of Bluetooth devices and headphones directly via SetupAPI
 pub fn query_bluetooth_and_audio() -> (Vec<Value>, Option<(String, Option<u8>)>) {
-    // 1. Aktif ses cikislarina bak (Kulaklik / Buds / Headphones var mi?)
+    // 1. Check the active audio outputs (any headphones / Buds / headset?)
     let outputs = crate::audio::list_outputs();
     let mut bt_batteries: HashMap<String, (u8, bool)> = HashMap::new(); // name -> (pct, is_ble)
 
     unsafe {
-        // Hem Classic Bluetooth (BTHENUM) hem de BLE GATT Pil Servisi 0x180F (BTHLEDEVICE / BTHLE) cihazlarini tara
+        // Scan both Classic Bluetooth (BTHENUM) and BLE GATT Battery Service 0x180F (BTHLEDEVICE / BTHLE) devices
         for (enumerator, is_ble) in [(w!("BTHENUM"), false), (w!("BTHLEDEVICE"), true), (w!("BTHLE"), true)] {
             if let Ok(hdev) = SetupDiGetClassDevsW(None, enumerator, None, DIGCF_PRESENT | DIGCF_ALLCLASSES) {
                 let mut idx = 0u32;
@@ -230,7 +230,7 @@ pub fn query_bluetooth_and_audio() -> (Vec<Value>, Option<(String, Option<u8>)>)
                     }
                     idx += 1;
 
-                    // Pil yuzdesi (1 byte: DEVPROP_TYPE_BYTE)
+                    // Battery percentage (1 byte: DEVPROP_TYPE_BYTE)
                     let mut ptype = DEVPROPTYPE::default();
                     let mut bbuf = [0u8; 4];
                     let mut req = 0u32;
@@ -270,7 +270,7 @@ pub fn query_bluetooth_and_audio() -> (Vec<Value>, Option<(String, Option<u8>)>)
         }));
     }
 
-    // Su an varsayilan veya aktif kulaklik hangisi?
+    // Which headphones are the default or active ones right now?
     let mut active_headset: Option<(String, Option<u8>)> = None;
     for (_, out_name, is_def) in &outputs {
         let low = out_name.to_lowercase();
@@ -295,7 +295,7 @@ pub fn get_sysmon() -> Value {
 }
 
 pub fn start() {
-    // Her ozellik sadece Ayarlar'da aciksa calisir; hepsi kapaliyken hicbir sensor okunmaz (sifir yuk).
+    // Each feature runs only if enabled in Settings; with all of them off no sensor is read (zero load).
     std::thread::spawn(|| {
         let mut prev_cpu = cpu_times();
         let mut prev_net = net_bytes();
@@ -324,7 +324,7 @@ pub fn start() {
 
             let mut snap = serde_json::Map::new();
 
-            // 1-4. CPU / RAM / Ag / GPU (sadece "Canli sistem gostergesi" aciksa)
+            // 1-4. CPU / RAM / network / GPU (only if "Live system monitor" is on)
             if want_sys {
                 let cur_cpu = cpu_times();
                 let d_idle = cur_cpu.0.saturating_sub(prev_cpu.0);
@@ -360,7 +360,7 @@ pub fn start() {
                 gpu_cache = None;
             }
 
-            // 5. Mikrofon / Kamera gizlilik noktalari
+            // 5. Microphone / camera privacy dots
             if want_priv {
                 let mic_apps = check_privacy_store("microphone");
                 let cam_apps = check_privacy_store("webcam");
@@ -370,7 +370,7 @@ pub fn start() {
                 snap.insert("camApps".into(), json!(cam_apps));
             }
 
-            // 5b. OBS / Xbox Game Bar kayit gostergesi (kirmizi nokta + sure)
+            // 5b. OBS / Xbox Game Bar recording indicator (red dot + duration)
             if want_rec {
                 if let Some((app, secs)) = detect_active_recording() {
                     snap.insert("recActive".into(), json!(true));
@@ -381,7 +381,7 @@ pub fn start() {
                 }
             }
 
-            // 6. Kulaklik baglandi animasyonu + pil yuzdesi (her 6 sn'de bir SetupAPI tara)
+            // 6. Headphones-connected animation + battery percentage (SetupAPI scan every 6 s)
             if want_hs {
                 if !headset_was_on || hs_cache.is_none() || tick % 3 == 0 {
                     let outputs = crate::audio::list_outputs();

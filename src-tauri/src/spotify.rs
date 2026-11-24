@@ -1,5 +1,5 @@
-// Spotify Web API: begenme (kutuphane), calma sirasi, arama, cal, siraya ekle.
-// Giris PKCE ile (gizli anahtar yok). Tarayici -> http://127.0.0.1:8989/login
+// Spotify Web API: like (library), play queue, search, play, add to queue.
+// Sign-in with PKCE (no client secret). Browser -> http://127.0.0.1:8989/login
 use crate::util::{data_dir, emit, shell_open};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -34,7 +34,7 @@ static CFG: Mutex<Option<Cfg>> = Mutex::new(None);
 static STATE: Mutex<Option<SpState>> = Mutex::new(None);
 static BACKOFF_UNTIL: AtomicU64 = AtomicU64::new(0);
 static POLLING: AtomicBool = AtomicBool::new(false);
-static WAKE: AtomicU64 = AtomicU64::new(0);   // yoklamayi hemen tetiklemek icin
+static WAKE: AtomicU64 = AtomicU64::new(0);   // to trigger polling immediately
 static SKIPPING: AtomicBool = AtomicBool::new(false);
 
 fn now_ms() -> u64 { SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64 }
@@ -49,7 +49,7 @@ fn push(f: impl FnOnce(&mut SpState)) {
 }
 pub fn is_connected() -> bool { cfg().refresh.is_some() }
 pub fn client_id() -> String { cfg().client_id }
-/// Ayarlar'dan yeni Client ID: farkliysa eski oturum gecersiz olur
+/// New Client ID from Settings: if it differs, the old session becomes invalid
 pub fn set_client_id(id: &str) {
     if cfg().client_id == id { return; }
     let c = Cfg { client_id: id.to_string(), ..Default::default() };
@@ -61,7 +61,7 @@ pub fn init() {
     let path = data_dir().join("spotify.json");
     let mut c: Cfg = std::fs::read_to_string(&path).ok().and_then(|s| serde_json::from_str(&s).ok())
         .or_else(|| {
-            // ilk calistirma: Electron surumundeki baglantiyi devral (yeniden giris gerekmesin)
+            // first run: take over the login from the old Electron version (no need to sign in again)
             if crate::util::is_test() { return None; }
             let old = std::env::var("APPDATA").ok()? + "\\pc-dynamic-island\\spotify.json";
             std::fs::read_to_string(old).ok().and_then(|s| serde_json::from_str(&s).ok())
@@ -74,7 +74,7 @@ pub fn init() {
     if connected { start_polling(); }
 }
 
-/* ---------- tokenlar + istekler ---------- */
+/* ---------- tokens + requests ---------- */
 struct ApiErr { status: u16, msg: String }
 impl ApiErr { fn new(status: u16, msg: impl Into<String>) -> Self { Self { status, msg: msg.into() } } }
 
@@ -98,7 +98,7 @@ async fn token_request(params: &[(&str, &str)]) -> Result<(), ApiErr> {
     let mut c = cfg();
     c.access = j["access_token"].as_str().map(String::from);
     c.expires_at = now_ms() + j["expires_in"].as_u64().unwrap_or(3600) * 1000 - 60_000;
-    if let Some(r) = j["refresh_token"].as_str() { c.refresh = Some(r.into()); }   // gelmezse eskisi kalir
+    if let Some(r) = j["refresh_token"].as_str() { c.refresh = Some(r.into()); }   // keep the old one if none is returned
     set_cfg(c);
     Ok(())
 }
@@ -139,7 +139,7 @@ async fn api(method: reqwest::Method, path: &str, body: Option<Value>) -> Result
         if status >= 400 {
             let msg = serde_json::from_str::<Value>(&text).ok()
                 .and_then(|j| j["error"]["message"].as_str().map(String::from))
-                .unwrap_or_else(|| format!("HTTP {status}"));   // JSON degilse (or. HTML hata sayfasi) govdeyi gosterme
+                .unwrap_or_else(|| format!("HTTP {status}"));   // do not show the body if it is not JSON (e.g. an HTML error page)
             return Err(ApiErr::new(status, msg));
         }
         return Ok(serde_json::from_str(&text).ok());
@@ -147,7 +147,7 @@ async fn api(method: reqwest::Method, path: &str, body: Option<Value>) -> Result
     Err(ApiErr::new(401, "yetki hatası"))
 }
 
-/* ---------- giris (PKCE) ---------- */
+/* ---------- sign-in (PKCE) ---------- */
 fn b64url(data: &[u8]) -> String {
     use base64::Engine;
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(data)
@@ -219,7 +219,7 @@ pub fn disconnect(msg: Option<String>) {
     crate::settings::broadcast();
 }
 
-/* ---------- su an calan + begenme + sira ---------- */
+/* ---------- now playing + like + queue ---------- */
 fn pick_image(imgs: &Value) -> String {
     let Some(arr) = imgs.as_array() else { return String::new() };
     let mut v: Vec<&Value> = arr.iter().collect();
@@ -294,7 +294,7 @@ fn is_track_uri(u: &str) -> bool {
         && p.next().is_none()
 }
 
-/* ---------- komutlar ---------- */
+/* ---------- commands ---------- */
 #[tauri::command] pub fn sp_get() { let c = is_connected(); push(|s| s.connected = c); }
 #[tauri::command] pub fn sp_connect() { connect(); }
 #[tauri::command] pub fn sp_disconnect() { disconnect(None); }
@@ -305,7 +305,7 @@ pub fn sp_like() {
     let (uri, liked) = { let g = STATE.lock().unwrap(); g.as_ref().map(|s| (s.uri.clone(), s.liked)).unwrap_or_default() };
     if uri.is_empty() { return; }
     let want = !liked;
-    push(|s| s.liked = want);   // anlik geri bildirim
+    push(|s| s.liked = want);   // instant feedback
     tauri::async_runtime::spawn(async move {
         let m = if want { reqwest::Method::PUT } else { reqwest::Method::DELETE };
         if let Err(e) = api(m, &format!("/me/library?uris={}", url_enc(&uri)), None).await {
@@ -319,7 +319,7 @@ async fn play_uris(uris: Vec<String>) -> Result<(), ApiErr> {
     match api(reqwest::Method::PUT, "/me/player/play", Some(body.clone())).await {
         Ok(_) => Ok(()),
         Err(e) if e.status == 404 => {
-            // Aktif cihaz secili degilse mevcut cihazlardan ilkini (tercihen bilgisayar) secip tekrar dene
+            // If no device is active, pick the first available one (preferably the computer) and retry
             if let Ok(Some(r)) = api(reqwest::Method::GET, "/me/player/devices", None).await {
                 if let Some(arr) = r["devices"].as_array() {
                     let dev = arr.iter().find(|d| d["is_active"].as_bool() == Some(true))
@@ -337,7 +337,7 @@ async fn play_uris(uris: Vec<String>) -> Result<(), ApiErr> {
     }
 }
 
-/// Siradaki n. sarkiya aninda dogrudan atla (aradaki sarkilar duyulmaz)
+/// Jump straight to the n-th track in the queue (the tracks in between are not played)
 #[tauri::command]
 pub fn sp_skipto(i: i64) {
     if !(0..=20).contains(&i) || SKIPPING.swap(true, Ordering::Relaxed) { return; }
@@ -389,14 +389,14 @@ pub fn sp_search(q: String) {
 
 async fn similar_tracks(uri: &str) -> Vec<String> {
     let Some(id) = uri.strip_prefix("spotify:track:") else { return vec![] };
-    // 1. Once /recommendations dene (bazi dev-mode uygulamalarda 403/404 donebilir)
+    // 1. Try /recommendations first (may return 403/404 for some dev-mode apps)
     if let Ok(Some(r)) = api(reqwest::Method::GET, &format!("/recommendations?seed_tracks={}&limit=10", url_enc(id)), None).await {
         if let Some(arr) = r["tracks"].as_array() {
             let uris: Vec<String> = arr.iter().filter_map(|t| t["uri"].as_str().map(String::from)).filter(|u| u != uri).collect();
             if !uris.is_empty() { return uris; }
         }
     }
-    // 2. Yedek: sarkinin sanatcisinin en populer sarkilari
+    // 2. Fallback: the track artist's top tracks
     let Ok(Some(tr)) = api(reqwest::Method::GET, &format!("/tracks/{}", url_enc(id)), None).await else { return vec![] };
     let Some(aid) = tr["artists"].as_array().and_then(|a| a.first()).and_then(|a| a["id"].as_str()) else { return vec![] };
     let Ok(Some(top)) = api(reqwest::Method::GET, &format!("/artists/{}/top-tracks", url_enc(aid)), None).await else { return vec![] };

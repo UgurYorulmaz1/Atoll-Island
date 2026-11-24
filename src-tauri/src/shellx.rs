@@ -1,5 +1,5 @@
-// Windows kabuk yardimcilari: dosya simgesi/onizleme (PNG), Gezgin uyumlu veri nesnesi,
-// yerel surukle-birak (SHDoDragDrop), pano (dosya listesi / resim)
+// Windows shell helpers: file icon/preview (PNG), Explorer-compatible data object,
+// native drag and drop (SHDoDragDrop), clipboard (file list / image)
 use crate::util::{b64, wide};
 use std::ffi::c_void;
 use windows::core::{Interface, Result, GUID};
@@ -15,9 +15,9 @@ use windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture;
 use windows::Win32::UI::Shell::Common::ITEMIDLIST;
 use windows::Win32::UI::Shell::*;
 
-/* ---------- simge / onizleme ---------- */
-/// Dosyanin kabuk onizlemesini (resimler icin kucuk resim, digerleri icin simge) PNG data URL olarak verir.
-/// Cagiran thread'de COM (STA) acik olmali.
+/* ---------- icon / preview ---------- */
+/// Returns the file's shell preview (thumbnail for images, icon for others) as a PNG data URL.
+/// COM (STA) must be initialized on the calling thread.
 pub fn icon_data_url(path: &str, px: i32) -> Option<String> {
     unsafe {
         let f: IShellItemImageFactory = SHCreateItemFromParsingName(&wide(path), None).ok()?;
@@ -46,7 +46,7 @@ unsafe fn hbitmap_to_png(hbmp: HBITMAP) -> Option<Vec<u8>> {
     bgra_to_png(&mut buf, w as u32, h as u32, true)
 }
 
-/// BGRA (ust-alt) -> PNG. Tum alfa 0 ise resim opaktir (kucuk resimlerde olur).
+/// BGRA (top-down) -> PNG. If every alpha is 0 the image is opaque (happens with thumbnails).
 fn bgra_to_png(buf: &mut [u8], w: u32, h: u32, premultiplied: bool) -> Option<Vec<u8>> {
     let all_zero_alpha = buf.chunks(4).all(|p| p[3] == 0);
     for p in buf.chunks_mut(4) {
@@ -68,7 +68,7 @@ fn bgra_to_png(buf: &mut [u8], w: u32, h: u32, premultiplied: bool) -> Option<Ve
     Some(out)
 }
 
-/* ---------- veri nesnesi (Gezgin'in anladigi dosya listesi) ---------- */
+/* ---------- data object (a file list Explorer understands) ---------- */
 pub fn data_object(paths: &[String]) -> Result<IDataObject> {
     unsafe {
         let mut pidls: Vec<*mut ITEMIDLIST> = Vec::new();
@@ -84,7 +84,7 @@ pub fn data_object(paths: &[String]) -> Result<IDataObject> {
     }
 }
 
-/// Windows'un yerel surukleme islemini baslatir (UI thread'inde, OLE acikken cagrilmali). Birakilana kadar bekler.
+/// Starts a native Windows drag operation (must be called on the UI thread with OLE initialized). Blocks until dropped.
 pub fn drag_files(hwnd: HWND, paths: &[String]) -> Result<DROPEFFECT> {
     let obj = data_object(paths)?;
     unsafe {
@@ -93,7 +93,7 @@ pub fn drag_files(hwnd: HWND, paths: &[String]) -> Result<DROPEFFECT> {
     }
 }
 
-/// Dosyalari panoya koy (Gezgin'de Ctrl+V ile yapistirilabilir). UI thread'inde cagrilmali.
+/// Put files on the clipboard (pasteable in Explorer with Ctrl+V). Must be called on the UI thread.
 pub fn clipboard_set_files(paths: &[String]) -> Result<()> {
     let obj = data_object(paths)?;
     unsafe { OleSetClipboard(&obj)?; OleFlushClipboard() }
@@ -101,14 +101,14 @@ pub fn clipboard_set_files(paths: &[String]) -> Result<()> {
 
 pub enum ClipContent { Files(Vec<String>), Png(Vec<u8>), Text(String), Empty }
 
-/// Pano icerigi gecmise alinmamasi gereken bir sey mi? (sifre yoneticileri bunu isaretler)
+/// Should the clipboard content be kept out of the history? (password managers flag this)
 pub fn clipboard_is_private() -> bool {
     unsafe {
         for name in ["ExcludeClipboardContentFromMonitorProcessing", "Clipboard Viewer Ignore"] {
             let f = RegisterClipboardFormatW(&wide(name));
             if f != 0 && IsClipboardFormatAvailable(f).is_ok() { return true; }
         }
-        // CanIncludeInClipboardHistory = 0 ise gecmise alma
+        // skip history if CanIncludeInClipboardHistory = 0
         let f = RegisterClipboardFormatW(&wide("CanIncludeInClipboardHistory"));
         if f != 0 && IsClipboardFormatAvailable(f).is_ok() && OpenClipboard(None).is_ok() {
             let mut private = false;
@@ -126,7 +126,7 @@ pub fn clipboard_is_private() -> bool {
 
 pub fn clipboard_seq() -> u32 { unsafe { GetClipboardSequenceNumber() } }
 
-/// Metni panoya koy
+/// Put text on the clipboard
 pub fn clipboard_set_text(text: &str) -> bool {
     unsafe {
         if OpenClipboard(None).is_err() { return false; }
@@ -146,7 +146,7 @@ pub fn clipboard_set_text(text: &str) -> bool {
     }
 }
 
-/// Klasor secme penceresi (STA thread'inde cagrilmali)
+/// Folder picker dialog (must be called on an STA thread)
 pub fn pick_folder(title: &str) -> Option<String> {
     unsafe {
         let d: IFileOpenDialog = CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).ok()?;
@@ -162,7 +162,7 @@ pub fn pick_folder(title: &str) -> Option<String> {
     }
 }
 
-/// Fiziksel RAM (bayt)
+/// Physical RAM (bytes)
 pub fn total_ram() -> u64 {
     unsafe {
         let mut m = MEMORYSTATUSEX { dwLength: std::mem::size_of::<MEMORYSTATUSEX>() as u32, ..Default::default() };
@@ -170,7 +170,7 @@ pub fn total_ram() -> u64 {
     }
 }
 
-/// Panodaki dosya listesini, resmi ya da metni oku
+/// Read the file list, image or text from the clipboard
 pub fn clipboard_read() -> ClipContent {
     unsafe {
         let mut opened = false;
@@ -236,7 +236,7 @@ unsafe fn dib_to_png(h: HANDLE) -> Option<Vec<u8>> {
         if off + stride * h_abs as usize > size { return None; }
         let mut rgba = vec![0u8; w as usize * h_abs as usize * 4];
         for y in 0..h_abs as usize {
-            let src_row = if hh > 0 { h_abs as usize - 1 - y } else { y };   // alttan-uste depolanmis olabilir
+            let src_row = if hh > 0 { h_abs as usize - 1 - y } else { y };   // may be stored bottom-up
             let src = ptr.add(off + src_row * stride);
             for x in 0..w as usize {
                 let s = src.add(x * (bpp as usize / 8));

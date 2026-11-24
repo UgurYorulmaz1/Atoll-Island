@@ -26,7 +26,7 @@ use tauri::{AppHandle, Manager, WebviewWindow};
 #[derive(Deserialize, Clone, Copy, Debug)]
 pub struct Rect { pub x: f64, pub y: f64, pub w: f64, pub h: f64 }
 
-/* ---------- komutlar ---------- */
+/* ---------- commands ---------- */
 #[tauri::command]
 fn media_cmd(cmd: String) {
     let ok = matches!(cmd.as_str(), "toggle" | "next" | "prev" | "shuffle" | "repeat")
@@ -46,7 +46,7 @@ fn audio_cmd(cmd: String) {
 #[tauri::command]
 fn set_rect(r: Rect) { winutil::set_rect(r); }
 
-/// Sadece gelistirme (debug) derlemesinde: otomatik test raporu yazar
+/// Debug builds only: writes the automated test report
 #[tauri::command]
 fn test_report(_s: String) {
     #[cfg(debug_assertions)]
@@ -56,7 +56,7 @@ fn test_report(_s: String) {
 #[tauri::command]
 fn kbd_focus(window: WebviewWindow, on: bool) { winutil::kbd_focus(&window, on); }
 
-/// Adaya sag tik menusu
+/// Right-click menu on the island
 #[tauri::command]
 fn show_menu(app: AppHandle, window: WebviewWindow) -> Result<(), String> {
     let e = |x: tauri::Error| x.to_string();
@@ -80,7 +80,7 @@ fn on_menu(app: &AppHandle, id: &str) {
     }
 }
 
-/* ---------- sistem tepsisi ---------- */
+/* ---------- system tray ---------- */
 fn tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     Menu::with_items(app, &[
         &MenuItem::with_id(app, "settings", tr("settings"), true, None::<&str>)?,
@@ -89,7 +89,7 @@ fn tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     ])
 }
 
-/// Dil degisince tepsi menusunu yeniden kur
+/// Rebuild the tray menu when the language changes
 pub fn rebuild_tray() {
     let app = util::app();
     if let (Some(tray), Ok(menu)) = (app.tray_by_id("island"), tray_menu(app)) { let _ = tray.set_menu(Some(menu)); }
@@ -103,7 +103,7 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
         .menu(&tray_menu(app)?)
         .show_menu_on_left_click(false)
         .on_tray_icon_event(|tray, ev| {
-            // sol tik: Ayarlar; sag tik: menu
+            // left click: Settings; right click: menu
             if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = ev {
                 settings::show_window(tray.app_handle());
             }
@@ -113,10 +113,10 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
 }
 
 fn main() {
-    // tek kopya (test modu haric)
+    // single instance (except in test mode)
     if !util::is_test() && !winutil::single_instance() { return; }
 
-    // WebView2 GPU hizlandirma (ayara gore acik veya yazilimsal yedek)
+    // WebView2 GPU acceleration (on, or software fallback, depending on the setting)
     if std::env::var_os("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS").is_none() {
         let args = if settings::gpu_accel_early() {
             "--enable-gpu-rasterization --enable-zero-copy --ignore-gpu-blocklist --enable-accelerated-2d-canvas"
@@ -154,9 +154,9 @@ fn main() {
             sysmon::start();
             weather::start();
             downloads::start();
-            if let Err(e) = setup_tray(app.handle()) { eprintln!("tepsi simgesi kurulamadi: {e}"); }
+            if let Err(e) = setup_tray(app.handle()) { eprintln!("could not create tray icon: {e}"); }
             let _ = win.show();
-            // Test modu (sadece gelistirme derlemesinde)
+            // Test mode (debug builds only)
             #[cfg(debug_assertions)]
             if util::is_test() {
                 if let Ok(path) = std::env::var("ISLAND_EVAL") {
@@ -170,9 +170,9 @@ fn main() {
             Ok(())
         })
         .build(tauri::generate_context!())
-        .expect("Dynamic Island baslatilamadi")
+        .expect("failed to start Atoll Island")
         .run(|_app, ev| {
-            // kapanista RAM'deki raf ogelerini (istenirse) diske kaydet
+            // on exit, save shelf items kept in RAM to disk (if enabled)
             if let tauri::RunEvent::Exit = ev { shelf::on_exit(); }
         });
 }

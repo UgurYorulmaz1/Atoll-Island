@@ -1,6 +1,6 @@
-// Yerel Calma Gecmisi ve Istatistikler ("Bugun 3 saat 12 dk dinledin, en cok Simge") + Haftalik Ozet Karti.
-// Tum veriler yalnizca yerel diskte (%APPDATA%\com.island.dynamic\listening_stats.json) tutulur.
-// Yalnizca Ayarlar -> "Calma gecmisi ve istatistik" (listening_stats) acikken kayit yapar.
+// Local play history and statistics ("You listened for 3 h 12 min today, mostly to X") + weekly summary card.
+// All data is kept only on the local disk (%APPDATA%\com.island.dynamic\listening_stats.json).
+// Records only while Settings -> "Play history and stats" (listening_stats) is on.
 use crate::util::{data_dir, emit};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -13,9 +13,9 @@ pub struct DayStat {
     #[serde(default)]
     pub total_secs: u64,
     #[serde(default)]
-    pub artists: HashMap<String, u64>, // sanatci -> saniye
+    pub artists: HashMap<String, u64>, // artist -> seconds
     #[serde(default)]
-    pub tracks: HashMap<String, u64>,  // "Sarki — Sanatci" -> saniye
+    pub tracks: HashMap<String, u64>,  // "Song — Artist" -> seconds
 }
 
 #[derive(Serialize, Deserialize, Default, Clone)]
@@ -31,13 +31,13 @@ fn file() -> std::path::PathBuf {
     data_dir().join("listening_stats.json")
 }
 
-/// Yerel tarihi "YYYY-MM-DD" olarak dondurur
+/// Returns the local date as "YYYY-MM-DD"
 fn today_key() -> String {
     let st = unsafe { GetLocalTime() };
     format!("{:04}-{:02}-{:02}", st.wYear, st.wMonth, st.wDay)
 }
 
-/// Son N gunun tarih anahtarlarini ("YYYY-MM-DD") hesaplar
+/// Computes the date keys ("YYYY-MM-DD") of the last N days
 fn recent_days(n: usize) -> Vec<String> {
     let st = unsafe { GetLocalTime() };
     let (mut y, mut m, mut d) = (st.wYear as i32, st.wMonth as i32, st.wDay as i32);
@@ -77,12 +77,12 @@ fn save_db(db: &StatsDb) {
     let _ = std::fs::write(file(), serde_json::to_string(db).unwrap_or_default());
 }
 
-/// Medya dongusunden her ~400ms'de bir cagrilir (sadece calma devam ederken)
+/// Called from the media loop every ~400 ms (only while playback continues)
 pub fn record_tick(title: &str, artist: &str, delta_ms: u64) {
     if !crate::settings::get().listening_stats || title.trim().is_empty() {
         return;
     }
-    // 1 saniyelik birikimlerle kaydet (400ms * 2.5 -> yuvarlatilmis)
+    // store in 1-second accumulations (400 ms * 2.5 -> rounded)
     static ACC_MS: Mutex<u64> = Mutex::new(0);
     let add_secs = {
         let mut acc = ACC_MS.lock().unwrap();
@@ -117,7 +117,7 @@ pub fn record_tick(title: &str, artist: &str, delta_ms: u64) {
     }
     *entry.tracks.entry(track_label).or_insert(0) += add_secs;
 
-    // 30 gunden eski kayitlari temizle
+    // remove entries older than 30 days
     if db.days.len() > 35 {
         let keep = recent_days(30);
         db.days.retain(|k, _| keep.contains(k));
@@ -144,7 +144,7 @@ fn top_items(map: &HashMap<String, u64>, n: usize) -> Vec<Value> {
         .collect()
 }
 
-/// Gunluk ve haftalik ozet verisi
+/// Daily and weekly summary data
 pub fn summary() -> Value {
     let g = DB.lock().unwrap();
     let Some(db) = g.as_ref() else {

@@ -1,6 +1,6 @@
-// Canli hava durumu + yagis uyarisi (sadece Ayarlar > "Hava durumu" acikken).
-// Konum: IP adresinden yaklasik (ipwho.is). Hava: Open-Meteo (ucretsiz, anahtarsiz).
-// 15 dakikada bir guncellenir; konum 6 saatte bir yeniden bulunur.
+// Live weather + rain alert (only while Settings > "Weather" is on).
+// Location: approximate, from the IP address (ipwho.is). Weather: Open-Meteo (free, no key).
+// Refreshed every 15 minutes; location is looked up again every 6 hours.
 use crate::util::emit;
 use serde_json::{json, Value};
 use std::sync::Mutex;
@@ -16,7 +16,7 @@ async fn get_json(url: &str) -> Option<Value> {
     r.json::<Value>().await.ok()
 }
 
-/// (enlem, boylam, sehir)
+/// (latitude, longitude, city)
 async fn locate() -> Option<(f64, f64, String)> {
     let j = get_json("https://ipwho.is/?fields=success,latitude,longitude,city").await?;
     if j["success"].as_bool() == Some(false) { return None; }
@@ -31,7 +31,7 @@ async fn fetch(lat: f64, lon: f64, city: &str) -> Option<Value> {
     let j = get_json(&url).await?;
     let cur = &j["current"];
     let now_precip = cur["precipitation"].as_f64().unwrap_or(0.0);
-    // Su an yagmiyorsa: onumuzdeki 60 dk icinde yagis baslayacak mi? (15 dk dilimler)
+    // If it is not raining now: will rain start within the next 60 min? (15-min slots)
     let mut rain_in: Option<u32> = None;
     if now_precip < 0.1 {
         if let Some(p) = j["minutely_15"]["precipitation"].as_array() {
@@ -68,7 +68,7 @@ pub fn start() {
             }
             tokio::time::sleep(Duration::from_secs(5)).await;
             if !crate::settings::get().weather { continue; }
-            if !was_on { next = Instant::now(); was_on = true; }   // yeni acildi: hemen getir
+            if !was_on { next = Instant::now(); was_on = true; }   // just enabled: fetch immediately
             if Instant::now() < next { continue; }
             if loc.is_none() || loc_at.elapsed() > Duration::from_secs(6 * 3600) {
                 if let Some(l) = locate().await { loc = Some(l); loc_at = Instant::now(); }

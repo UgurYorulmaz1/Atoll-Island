@@ -9,12 +9,25 @@ An animated **Dynamic Island / Now Bar** for Windows 10 and 11, written in pure 
 
 > **Beta:** Features are tested in daily use. If you find a bug or have an idea, please open an issue.
 
+<p align="center"><img src="docs/demo.gif" alt="Atoll Island demo: idle clock, now playing, expanded player, word-by-word lyrics, volume, notification and a second media source" width="520"></p>
+
+## Screenshots
+
+| | |
+|:---:|:---:|
+| <img src="docs/expanded.png" alt="Expanded media player" width="400"><br>**Expanded player** with artwork-tinted background | <img src="docs/lyrics.png" alt="Word-by-word synced lyrics" width="400"><br>**Word-by-word synced lyrics** |
+| <img src="docs/notification.png" alt="Notification" width="400"><br>**Notifications** | <img src="docs/call.png" alt="Incoming call card" width="400"><br>**Incoming call card** |
+| <img src="docs/two-sources.png" alt="Two media sources" width="400"><br>**Two sources** (main pill + bubble) | <img src="docs/volume.png" alt="Volume indicator" width="400"><br>**Volume** (replaces the Windows OSD) |
+| <img src="docs/idle.png" alt="Idle clock with weather" width="400"><br>**Idle** clock and weather | <img src="docs/downloads.png" alt="Download progress" width="400"><br>**Download progress** (Steam / browsers) |
+
+<sub>Screenshots are rendered from the real UI with sample data; the track, artwork and messages are made up.</sub>
+
 ---
 
 ## Installation
 
 ### 1. MSI installer (recommended)
-Prebuilt `.msi` installers (`en-US` and `tr-TR`) are published on the [Releases](../../releases) page when available.
+Download the latest `.msi` installer (`en-US` or `tr-TR`) from the [Releases](../../releases/latest) page and run it.
 - Creates a Start Menu shortcut and an Add/Remove Programs entry.
 - Installs WebView2 automatically if it is missing (it ships with Windows 11).
 

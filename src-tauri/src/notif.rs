@@ -1,4 +1,4 @@
-// Windows bildirimleri (UserNotificationListener): yeni gelen toast'lari adaya gonderir
+// Windows notifications (UserNotificationListener): forwards new toasts to the island
 use crate::util::emit;
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
@@ -13,7 +13,7 @@ use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
 pub fn start() {
     std::thread::spawn(|| {
         unsafe { let _ = CoInitializeEx(None, COINIT_MULTITHREADED); }
-        if let Err(e) = run() { eprintln!("bildirimler devre disi: {e:?}"); }
+        if let Err(e) = run() { eprintln!("notifications disabled: {e:?}"); }
     });
 }
 
@@ -27,9 +27,9 @@ fn run() -> Result<()> {
         return Ok(());
     }
     let mut seen: HashSet<u32> = HashSet::new();
-    for n in l.GetNotificationsAsync(NotificationKinds::Toast)?.join()? { seen.insert(n.Id()?); }  // eskileri gosterme
+    for n in l.GetNotificationsAsync(NotificationKinds::Toast)?.join()? { seen.insert(n.Id()?); }  // do not show old ones
     let mut icons: HashMap<String, Option<String>> = HashMap::new();
-    let mut calls: HashSet<u32> = HashSet::new();   // ekrandaki arama bildirimleri
+    let mut calls: HashSet<u32> = HashSet::new();   // call notifications currently on screen
     loop {
         std::thread::sleep(Duration::from_millis(1500));
         let Ok(list) = l.GetNotificationsAsync(NotificationKinds::Toast).and_then(|op| op.join()) else { continue };
@@ -43,13 +43,13 @@ fn run() -> Result<()> {
                 emit("media", v);
             }
         }
-        // arama bildirimi kalktiysa (cevaplandi / reddedildi / cevapsiz) adadaki arama kartini kapat
+        // if the call notification is gone (answered / declined / missed), close the call card on the island
         let gone: Vec<u32> = calls.iter().filter(|id| !present.contains(id)).copied().collect();
         for id in gone { calls.remove(&id); emit("media", json!({ "type": "notif-gone", "id": id.to_string() })); }
     }
 }
 
-/// Gelen sesli/goruntulu arama bildirimi mi? (WhatsApp, Telegram, Teams, Skype, Signal, Zoom, Messenger, Discord)
+/// Is this an incoming voice/video call notification? (WhatsApp, Telegram, Teams, Skype, Signal, Zoom, Messenger, Discord)
 fn call_kind(app: &str, aumid: &str, texts: &[String]) -> Option<&'static str> {
     let a = format!("{} {}", app, aumid).to_lowercase();
     let apps = ["whatsapp", "telegram", "teams", "skype", "signal", "zoom", "messenger", "discord", "viber"];
@@ -88,7 +88,7 @@ fn describe(n: &UserNotification, icons: &mut HashMap<String, Option<String>>) -
 
 fn id_str(n: &UserNotification) -> String { n.Id().map(|i| i.to_string()).unwrap_or_default() }
 
-/// Bildirimin geldigi uygulamayi one getir (pencere basligina gore eslestirir)
+/// Bring the app that sent the notification to the front (matched by window title)
 #[tauri::command]
 pub fn focus_notif_app(app_name: String) {
     use windows::core::BOOL;

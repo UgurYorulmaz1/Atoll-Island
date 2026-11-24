@@ -1,11 +1,11 @@
-// Electron'daki window.island arayuzunun Tauri karsiligi: arayuz kodu degismeden calisir.
+// Tauri counterpart of Electron's window.island API: the UI code runs unchanged.
 (() => {
   const T = window.__TAURI__;
   const invoke = (cmd, args) => T.core.invoke(cmd, args).catch((e) => console.warn(cmd, e));
   const on = (ev, cb) => T.event.listen(ev, (e) => cb(e.payload));
 
   window.island = {
-    // medya / ses / pencere
+    // media / volume / window
     onMedia: (cb) => on('media', cb),
     cmd: (c) => invoke('media_cmd', { cmd: c }),
     audio: (c) => invoke('audio_cmd', { cmd: c }),
@@ -16,7 +16,7 @@
     setSetting: (key, value) => invoke('set_setting', { key, value }),
     onSettings: (cb) => on('settings', cb),
 
-    // raf
+    // shelf
     pathFor: () => '',
     onShelf: (cb) => on('shelf', cb),
     onShelfMsg: (cb) => on('shelf-msg', cb),
@@ -29,7 +29,7 @@
     shelfDrag: (ids) => invoke('shelf_drag', { ids }),
     shelfCopy: (ids) => invoke('shelf_copy', { ids }),
     shelfPaste: () => invoke('shelf_paste'),
-    // Tauri'de dosya birakma olaylari pencereden gelir: { type: enter|over|drop|leave, paths }
+    // In Tauri, file drop events come from the window: { type: enter|over|drop|leave, paths }
     onFileDrag: (cb) => T.webviewWindow.getCurrentWebviewWindow().onDragDropEvent((e) => cb(e.payload)),
 
     // spotify
@@ -47,10 +47,10 @@
     onSpDevices: (cb) => on('sp-devices', cb),
     spTransfer: (deviceId) => invoke('sp_transfer', { deviceId }),
 
-    // sozler
+    // lyrics
     lyrics: (q) => T.core.invoke('lyrics_get', { q }).catch(() => ({ found: false })),
 
-    // sistem / ses cikisi / kulaklik / tam ekran / kisayol
+    // system / audio output / headphones / fullscreen / shortcut
     switchAudioOutput: () => T.core.invoke('switch_audio_output').catch(() => ({ ok: false })),
     getSysmon: () => T.core.invoke('get_sysmon').catch(() => ({})),
     onSysmon: (cb) => on('sysmon', cb),

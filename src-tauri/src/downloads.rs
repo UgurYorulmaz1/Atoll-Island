@@ -1,8 +1,8 @@
-// Indirme ilerlemesi (sadece Ayarlar > "Indirme ilerlemesi" acikken):
-// - Steam: kutuphanelerdeki appmanifest_*.acf -> BytesDownloaded / BytesToDownload (gercek yuzde)
-// - Tarayicilar (Chrome/Edge/Firefox/Opera/Brave): Indirilenler klasorundeki yarim dosyalar
-//   (.crdownload / .part / .partial). Tarayicilar toplam boyutu disari vermez -> yuzde yok, hiz var.
-//   Yarim dosya kaybolup asil dosya belirince "Indirme tamamlandi" (tiklayinca acilir / rafa alinir).
+// Download progress (only while Settings > "Download progress" is on):
+// - Steam: appmanifest_*.acf in each library -> BytesDownloaded / BytesToDownload (real percentage)
+// - Browsers (Chrome/Edge/Firefox/Opera/Brave): partial files in the Downloads folder
+//   (.crdownload / .part / .partial). Browsers do not expose the total size -> no percentage, but speed.
+//   When the partial file disappears and the final file appears: "Download complete" (click to open / add to shelf).
 use crate::util::emit;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime};
 
-static DONE: Mutex<Vec<String>> = Mutex::new(Vec::new());   // acilabilecek tamamlanmis dosyalar
+static DONE: Mutex<Vec<String>> = Mutex::new(Vec::new());   // finished files that can be opened
 
 fn downloads_dir() -> Option<PathBuf> {
     std::env::var("USERPROFILE").ok().map(|u| PathBuf::from(u).join("Downloads")).filter(|p| p.is_dir())
@@ -28,7 +28,7 @@ fn steam_libraries() -> Vec<PathBuf> {
             if let Some(rest) = t.strip_prefix("\"path\"") {
                 let p = rest.trim().trim_matches('"').replace("\\\\", "\\");
                 let lib = PathBuf::from(p).join("steamapps");
-                // ayni kutuphane farkli buyuk/kucuk harf ya da / \ ile iki kez gelmesin
+                // avoid listing the same library twice due to letter case or / vs \
                 let key = |x: &PathBuf| x.to_string_lossy().to_lowercase().replace('/', "\\");
                 if lib.is_dir() && !libs.iter().any(|l| key(l) == key(&lib)) { libs.push(lib); }
             }
@@ -37,7 +37,7 @@ fn steam_libraries() -> Vec<PathBuf> {
     libs
 }
 
-/// "[2026-11-22 11:17:26]" -> gun*86400+sn (sadece farklar icin)
+/// "[2026-11-22 11:17:26]" -> day*86400+sec (only used for differences)
 fn log_time(line: &str) -> Option<i64> {
     let t = line.get(1..20)?;
     let n = |a: usize, b: usize| t.get(a..b)?.parse::<i64>().ok();
@@ -55,7 +55,7 @@ fn now_local() -> i64 {
     days_from_civil(st.wYear as i64, st.wMonth as i64, st.wDay as i64) * 86400 + st.wHour as i64 * 3600 + st.wMinute as i64 * 60 + st.wSecond as i64
 }
 
-/// (indirilen, toplam, duraklatildi) - Steam content_log.txt'den tahmini ilerleme
+/// (downloaded, total, paused) - estimated progress from Steam's content_log.txt
 fn steam_log_progress(appid: &str) -> Option<(u64, u64, bool)> {
     use std::io::{Read, Seek, SeekFrom};
     let hkcu = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER);
@@ -75,7 +75,7 @@ fn steam_log_progress(appid: &str) -> Option<(u64, u64, bool)> {
     let total: u64 = rest.split(|c: char| !c.is_ascii_digit()).next()?.parse().ok()?;
     let t0 = log_time(sl)?;
     let mut prev = t0;
-    let mut last_rate = 0.0f64;      // bayt/sn
+    let mut last_rate = 0.0f64;      // bytes/sec
     let mut got: f64 = 0.0;
     let mut paused = false;
     let pause_tag = format!("AppID {appid} state changed");
@@ -92,7 +92,7 @@ fn steam_log_progress(appid: &str) -> Option<(u64, u64, bool)> {
             if !paused { if let Some(t) = log_time(l) { prev = prev.max(t); } }
         }
     }
-    if !paused { got += last_rate * (now_local() - prev).clamp(0, 120) as f64; }   // son kayittan beri (en fazla 2 dk)
+    if !paused { got += last_rate * (now_local() - prev).clamp(0, 120) as f64; }   // since the last entry (at most 2 min)
     let done = (start_done as f64 + got).min(total as f64 * 0.99) as u64;
     Some((done, total, paused))
 }
@@ -116,16 +116,16 @@ fn steam_downloads(libs: &[PathBuf]) -> Vec<Value> {
             let Ok(txt) = std::fs::read_to_string(&p) else { continue };
             let num = |k: &str| -> u64 { acf_value(&txt, k).and_then(|v| v.parse().ok()).unwrap_or(0) };
             let flags = num("StateFlags");
-            // Steam indirme sirasinda BytesDownloaded'i guncellemez ve dosyalari bastan tam boyutta olusturur
-            // (klasor boyutu ise yaramaz). Ilerleme: content_log.txt -> "update started : download A/B" +
-            // dakikada bir yazilan "Current download rate" kayitlarinin zamana gore toplami.
+            // Steam does not update BytesDownloaded while downloading and preallocates files at full size
+            // (so folder size is useless). Progress: content_log.txt -> "update started : download A/B" +
+            // the time-weighted sum of the "Current download rate" entries written once a minute.
             let appid = name.trim_start_matches("appmanifest_").trim_end_matches(".acf");
             let mut paused = false;
             let (total, done) = match (flags & 1024 != 0).then(|| steam_log_progress(appid)).flatten() {
                 Some((d, t, p)) => { paused = p; (t, d) }
                 None => (num("BytesToDownload"), num("BytesDownloaded")),
             };
-            // StateFlags: 2 = guncelleme gerekli, 512 = duraklatildi, 1024 = indirme basladi (1026 = iniyor)
+            // StateFlags: 2 = update required, 512 = paused, 1024 = download started (1026 = downloading)
             if total > 0 && done < total && flags & 1024 != 0 && flags & 512 == 0 {
                 let title = acf_value(&txt, "name").unwrap_or_else(|| "Steam".into());
                 out.push(json!({ "kind": "steam", "name": title, "done": done, "total": total, "paused": paused,
@@ -137,8 +137,8 @@ fn steam_downloads(libs: &[PathBuf]) -> Vec<Value> {
     out
 }
 
-/* ---------- tarayicilar ---------- */
-/* ---------- tarayicilar (Chrome/Edge/Brave/Opera gercek % + Firefox) ---------- */
+/* ---------- browsers ---------- */
+/* ---------- browsers (real % for Chrome/Edge/Brave/Opera + Firefox) ---------- */
 const PARTIAL: [&str; 4] = [".crdownload", ".part", ".partial", ".download"];
 
 fn is_partial(name: &str) -> bool { let l = name.to_lowercase(); PARTIAL.iter().any(|e| l.ends_with(e)) }
@@ -149,7 +149,7 @@ fn final_name(partial: &str) -> String {
     partial.to_string()
 }
 
-/// Chromium tabanli tarayicilarin History SQLite veritabanindan aktif indirmelerin (current_path/file -> (target_name, received, total)) bilgisini okur
+/// Reads active downloads (current_path/file -> (target_name, received, total)) from the History SQLite database of Chromium-based browsers
 fn browser_sqlite_progress() -> HashMap<String, (String, u64, u64)> {
     let mut map = HashMap::new();
     let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
@@ -192,7 +192,7 @@ fn epic_downloads() -> Vec<Value> {
     let Ok(local) = std::env::var("LOCALAPPDATA") else { return vec![] };
     let log_path = PathBuf::from(local).join(r"EpicGamesLauncher\Saved\Logs\EpicGamesLauncher.log");
     let Ok(meta) = std::fs::metadata(&log_path) else { return vec![] };
-    // Son 90 sn icinde degismediyse aktif Epic indirmesi yok (0 is yuk)
+    // If nothing changed in the last 90 s there is no active Epic download (zero work)
     let recent = meta.modified().ok().and_then(|m| SystemTime::now().duration_since(m).ok()).map(|d| d < Duration::from_secs(90)).unwrap_or(false);
     if !recent { return vec![]; }
     let Ok(mut f) = std::fs::File::open(&log_path) else { return vec![] };
@@ -246,10 +246,10 @@ pub fn start() {
     std::thread::spawn(|| {
         let mut libs: Vec<PathBuf> = Vec::new();
         let mut libs_at = Instant::now() - Duration::from_secs(3600);
-        // yarim dosya -> (son boyut, son zaman, hiz B/sn)
+        // partial file -> (last size, last time, speed B/s)
         let mut seen: HashMap<PathBuf, (u64, Instant, f64)> = HashMap::new();
         let mut was_active = false;
-        let mut steam_seen: HashMap<String, String> = HashMap::new();   // oyun adi -> appmanifest yolu
+        let mut steam_seen: HashMap<String, String> = HashMap::new();   // game name -> appmanifest path
         loop {
             if !crate::settings::get().downloads {
                 if was_active { emit("downloads", json!({ "items": [] })); was_active = false; }
@@ -262,8 +262,8 @@ pub fn start() {
             let mut items = steam_downloads(&libs);
             items.extend(epic_downloads());
 
-            // Steam: listeden cikan oyun ancak bilgi dosyasi "tam kurulu" diyorsa tamamlandi sayilir.
-            // (Duraklatilan indirme ya da o an okunamayan .acf sahte "tamamlandi" uretmesin.)
+            // Steam: a game that leaves the list counts as finished only if its manifest says "fully installed".
+            // (A paused download or an .acf that cannot be read right now must not produce a false "finished".)
             let now_steam: HashMap<String, String> = items.iter().filter(|v| v["kind"].as_str() == Some("steam"))
                 .filter_map(|v| Some((v["name"].as_str()?.to_string(), v["manifest"].as_str().unwrap_or("").to_string()))).collect();
             let mut keep: HashMap<String, String> = HashMap::new();
@@ -273,14 +273,14 @@ pub fn start() {
                     Some(f) if f & 4 != 0 && f & (1024 | 512) == 0 => {
                         emit("download-done", json!({ "kind": "steam", "name": g, "path": null }));
                     }
-                    Some(f) if f & 512 != 0 => {}                                 // duraklatildi: bildirim yok
-                    _ => { keep.insert(g.clone(), manifest.clone()); }             // okunamadi / hala guncelleniyor: takipte kalsin
+                    Some(f) if f & 512 != 0 => {}                                 // paused: no notification
+                    _ => { keep.insert(g.clone(), manifest.clone()); }             // unreadable / still updating: keep tracking
                 }
             }
             steam_seen = now_steam;
             steam_seen.extend(keep);
 
-            // Tarayicilar
+            // Browsers
             if let Some(dir) = downloads_dir() {
                 let mut current: HashSet<PathBuf> = HashSet::new();
                 let mut partials: Vec<(PathBuf, String, u64)> = Vec::new();
@@ -301,7 +301,7 @@ pub fn start() {
                     let dt = now.duration_since(entry.1).as_secs_f64();
                     if dt >= 0.9 {
                         let inst = size.saturating_sub(entry.0) as f64 / dt;
-                        entry.2 = if entry.2 == 0.0 { inst } else { entry.2 * 0.6 + inst * 0.4 };   // yumusatilmis hiz
+                        entry.2 = if entry.2 == 0.0 { inst } else { entry.2 * 0.6 + inst * 0.4 };   // smoothed speed
                         entry.0 = size; entry.1 = now;
                     }
                     let mut shown = final_name(&name);
@@ -316,14 +316,14 @@ pub fn start() {
                     }
                     items.push(json!({ "kind": "browser", "name": shown, "done": done_v, "total": total_v, "pct": pct_v, "speed": entry.2.round() as u64 }));
                 }
-                // biten yarim dosyalar
+                // finished partial files
                 let finished: Vec<PathBuf> = seen.keys().filter(|k| !current.contains(*k)).cloned().collect();
                 for f in finished {
                     seen.remove(&f);
                     let fname = f.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
                     let mut target = dir.join(final_name(&fname));
                     if !target.is_file() || std::fs::metadata(&target).map(|m| m.len()).unwrap_or(0) == 0 {
-                        // Chrome "Unconfirmed 123.crdownload" -> son 10 sn'de degisen en yeni dosya
+                        // Chrome "Unconfirmed 123.crdownload" -> newest file changed in the last 10 s
                         target = newest_recent(&dir).unwrap_or(target);
                     }
                     if target.is_file() && std::fs::metadata(&target).map(|m| m.len()).unwrap_or(0) > 0 {

@@ -1,4 +1,4 @@
-// Windows medya oturumu (SMTC): su an calan, kapak, kontroller. PowerShell yerine dogrudan WinRT.
+// Windows media session (SMTC): now playing, artwork, controls. Direct WinRT instead of PowerShell.
 use crate::util::{b64, emit, filetime_to_unix_ms};
 use serde_json::json;
 use std::sync::mpsc::{channel, RecvTimeoutError, Sender};
@@ -36,7 +36,7 @@ pub fn start() {
         let (mut sec_json, mut sec_key, mut sec_thumb) = (String::new(), String::new(), None::<serde_json::Value>);
         let mut prev_playing: std::collections::HashSet<String> = std::collections::HashSet::new();
         loop {
-            // komut gelirse hemen isle, gelmezse 400 ms'de bir durumu yokla
+            // handle commands immediately; otherwise poll the state every 400 ms
             match rx.recv_timeout(Duration::from_millis(800)) {
                 Ok(cmd) => { let _ = handle(&mgr, &cmd); last_json.clear(); continue; }
                 Err(RecvTimeoutError::Disconnected) => return,
@@ -44,7 +44,7 @@ pub fn start() {
             }
             tick = tick.wrapping_add(1);
             enforce_focus(&mgr, &mut prev_playing, tick == 1);
-            // arayuz gec acilirsa (ya da yeniden yuklenirse) durumu kacirmasin diye ara sira tekrar gonder
+            // resend occasionally so the UI does not miss the state if it loads late (or reloads)
             let resend = tick % 8 == 0;
             match snapshot(&mgr) {
                 Ok(Some((v, key, props))) => {
@@ -74,7 +74,7 @@ pub fn start() {
                     last_key.clear();
                 }
             }
-            // Ayni anda calan IKINCI kaynak (ada ikiye bolunur)
+            // A SECOND source playing at the same time (shown as a bubble)
             match secondary(&mgr, &last_key) {
                 Some((v, key, props)) => {
                     let s = v.to_string();
@@ -100,15 +100,15 @@ pub fn start() {
 }
 
 fn split_artist(artist: String, album: String) -> (String, String) {
-    // Apple Music sanatci alanina albumu de ekliyor: "Sanatci — Albüm - Single" -> ayir
+    // Apple Music puts the album into the artist field: "Artist — Album - Single" -> split
     match artist.split_once(" \u{2014} ") {
         Some((a, rest)) => (a.trim().to_string(), if album.is_empty() { rest.trim().to_string() } else { album }),
         None => (artist, album),
     }
 }
 
-/// Ana kaynak disinda, FARKLI bir sey calan ilk oturum.
-/// (Ayni sarkiyi bildiren ikiz oturumlar - or. spotifast + resmi Spotify - ikinci kaynak sayilmaz.)
+/// The first session, other than the main source, that plays something DIFFERENT.
+/// (Twin sessions reporting the same track - e.g. spotifast + official Spotify - do not count as a second source.)
 fn secondary(mgr: &GlobalSystemMediaTransportControlsSessionManager, primary_key: &str)
     -> Option<(serde_json::Value, String, GlobalSystemMediaTransportControlsSessionMediaProperties)> {
     let primary = LAST_APP.lock().unwrap().clone();
@@ -157,7 +157,7 @@ fn snapshot(mgr: &GlobalSystemMediaTransportControlsSessionManager)
         "position": r2((pos - start) as f64 / 1e7),
         "duration": r2((end - start) as f64 / 1e7),
         "updated": filetime_to_unix_ms(tl.LastUpdatedTime()?.UniversalTime),
-        // Apple Music: Windows uzerinden degil, UI Automation ile sariyoruz
+        // Apple Music: seek via UI Automation, not through Windows
         "canSeek": ctl.IsPlaybackPositionEnabled().unwrap_or(false) || is_apple_music(&app),
         "canShuffle": ctl.IsShuffleEnabled().unwrap_or(false),
         "canRepeat": ctl.IsRepeatEnabled().unwrap_or(false),
@@ -168,10 +168,10 @@ fn snapshot(mgr: &GlobalSystemMediaTransportControlsSessionManager)
     Ok(Some((v, key, p)))
 }
 
-/* ---------- oturum secimi ----------
-   Windows'un "gecerli oturum"u her zaman calan uygulama olmuyor (or. Spotify duraklatilmis, Apple Music caliyor).
-   Biz secer, gosterim ve komutlari hep AYNI oturuma goturuz: secili oturum caliyorsa ona sadik kal,
-   yoksa calan ilk oturum, o da yoksa en son secilen, en son Windows'un sectigi. */
+/* ---------- session selection ----------
+   Windows' "current session" is not always the app that is playing (e.g. Spotify paused, Apple Music playing).
+   We pick the session ourselves and always route display and commands to the SAME one: stick with the selected session while it plays,
+   otherwise the first playing session, otherwise the last selected one, and finally the one Windows picked. */
 static LAST_APP: Mutex<String> = Mutex::new(String::new());
 
 fn app_id(s: &GlobalSystemMediaTransportControlsSession) -> String {
@@ -199,9 +199,9 @@ fn pick(mgr: &GlobalSystemMediaTransportControlsSessionManager) -> Option<Global
 }
 fn is_apple_music(id: &str) -> bool { id.contains("AppleMusic") }
 
-/* ---------- ses odagi: ayni anda tek kaynak ----------
-   Bir uygulama YENI calmaya baslarsa ve baska biri de caliyorsa: yeni olan ana kaynak olur, digerleri duraklatilir.
-   (Ayarlar > "Tek ses kaynagi", varsayilan acik.) */
+/* ---------- audio focus: one source at a time ----------
+   When an app STARTS playing while another one is playing too, the new one becomes the main source and the others are paused.
+   (Settings > "Single audio source", off by default.) */
 fn pause_others(mgr: &GlobalSystemMediaTransportControlsSessionManager, keep: &str) {
     if let Ok(list) = mgr.GetSessions() {
         for s in list {
@@ -221,7 +221,7 @@ fn enforce_focus(mgr: &GlobalSystemMediaTransportControlsSessionManager,
     }
     let on = crate::settings::get().single_source;
     if on && !first && now.len() > 1 {
-        // yeni baslayan (onceki turda calmayan) kaynak kazanir
+        // the newly started source (not playing in the previous tick) wins
         if let Some(newest) = order.iter().find(|id| !prev.contains(*id)).cloned() {
             *LAST_APP.lock().unwrap() = newest.clone();
             pause_others(mgr, &newest);
@@ -232,7 +232,7 @@ fn enforce_focus(mgr: &GlobalSystemMediaTransportControlsSessionManager,
 }
 
 fn handle(mgr: &GlobalSystemMediaTransportControlsSessionManager, cmd: &str) -> Result<()> {
-    // "focus <uygulama>": o kaynagi ana kaynak yap (bolunmus adada yariya tiklayinca)
+    // "focus <app>": make that source the main one (when its bubble is clicked)
     if let Some(id) = cmd.strip_prefix("focus ") {
         if mgr.GetSessions()?.into_iter().any(|s| app_id(&s) == id) {
             *LAST_APP.lock().unwrap() = id.to_string();
@@ -244,7 +244,7 @@ fn handle(mgr: &GlobalSystemMediaTransportControlsSessionManager, cmd: &str) -> 
     let mut parts = cmd.split(' ');
     match parts.next().unwrap_or("") {
         "toggle" => {
-            // bazi uygulamalar "toggle" yerine ayri oynat/duraklat bekler
+            // some apps expect separate play/pause instead of "toggle"
             let ctl = s.GetPlaybackInfo()?.Controls()?;
             if is_playing(&s) && ctl.IsPauseEnabled().unwrap_or(false) { s.TryPauseAsync()?.join()?; }
             else if !is_playing(&s) && ctl.IsPlayEnabled().unwrap_or(false) { s.TryPlayAsync()?.join()?; }
@@ -259,7 +259,7 @@ fn handle(mgr: &GlobalSystemMediaTransportControlsSessionManager, cmd: &str) -> 
                 let start = s.GetTimelineProperties()?.StartTime()?.Duration;
                 s.TryChangePlaybackPositionAsync(start + (sec * 1e7) as i64)?.join()?;
             } else if is_apple_music(&app_id(&s)) {
-                // Apple Music Windows'a sarma izni vermiyor: kendi ilerleme cubugunu UI Automation ile ayarla
+                // Apple Music does not allow seeking through Windows: set its own progress bar via UI Automation
                 crate::uia::apple_music_seek(sec)?;
             }
         }
@@ -268,7 +268,7 @@ fn handle(mgr: &GlobalSystemMediaTransportControlsSessionManager, cmd: &str) -> 
             s.TryChangeShuffleActiveAsync(!cur)?.join()?;
         }
         "repeat" => {
-            // Yok(0) -> Liste(2) -> Parca(1) -> Yok
+            // None(0) -> List(2) -> Track(1) -> None
             let cur = s.GetPlaybackInfo()?.AutoRepeatMode().ok().and_then(|r| r.Value().ok()).map(|m| m.0).unwrap_or(0);
             let next = match cur { 0 => 2, 2 => 1, _ => 0 };
             s.TryChangeAutoRepeatModeAsync(MediaPlaybackAutoRepeatMode(next))?.join()?;
@@ -278,12 +278,12 @@ fn handle(mgr: &GlobalSystemMediaTransportControlsSessionManager, cmd: &str) -> 
     Ok(())
 }
 
-/// Stream referansini (kapak, uygulama logosu) data URL'e cevir
+/// Convert a stream reference (artwork, app logo) into a data URL
 pub fn read_ref(r: &IRandomAccessStreamReference) -> Option<String> {
     let s = r.OpenReadAsync().ok()?.join().ok()?;
     let size = s.Size().ok()?;
     if !(100..8_000_000).contains(&size) { return None; }
-    // Windows turu liste olarak verebiliyor: "image/jpeg,image/jpe,image/jpg" -> ilkini al
+    // Windows may return the type as a list: "image/jpeg,image/jpe,image/jpg" -> take the first
     let ct = s.ContentType().map(|h| h.to_string()).unwrap_or_default()
         .split(',').next().unwrap_or("").trim().to_string();
     let input = s.GetInputStreamAt(0).ok()?;

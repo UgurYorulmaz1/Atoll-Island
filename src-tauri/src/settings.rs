@@ -1,4 +1,4 @@
-// Ayarlar: diske kaydedilir, degisince tum pencerelere "settings" olayi gider.
+// Settings: saved to disk; every change sends a "settings" event to all windows.
 use crate::util::{data_dir, emit};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -8,40 +8,40 @@ use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Settings {
-    pub lang: String,               // "tr" | "en"
-    pub browser_lyrics: bool,       // tarayicida sozler (YouTube Music her zaman acik)
-    pub clipboard_history: bool,    // Asama 3
-    pub storage: String,            // "disk" | "ram"  (Asama 3)
-    pub storage_dir: String,        // bos = varsayilan klasor
-    pub limit_gb: f64,              // raf boyut siniri
+    pub lang: String,               // one of the 12 language codes ("tr", "en", "de", ...)
+    pub browser_lyrics: bool,       // lyrics in browsers (always on for YouTube Music)
+    pub clipboard_history: bool,
+    pub storage: String,            // "disk" | "ram"
+    pub storage_dir: String,        // empty = default folder
+    pub limit_gb: f64,              // shelf size limit
     pub save_ram_on_exit: bool,
-    // Yeni ozellikler: hepsi VARSAYILAN KAPALI, sadece Ayarlar'dan acilir
-    pub show_sys_monitor: bool,     // canli sistem & oyun gostergesi (CPU/GPU/RAM/Ag)
-    pub headset_alerts: bool,       // kulaklik baglandi animasyonu + pil yuzdesi
-    pub privacy_dots: bool,         // mikrofon / kamera gizlilik noktalari
-    pub audio_switch: bool,         // hoparlor simgesine sag tik: ses cikisini degistir
-    pub auto_hide_fullscreen: bool, // tam ekran oyun/videoda otomatik gizle
-    pub global_shortcut: bool,      // Ctrl+Shift+Space ile adayi ac
-    pub single_source: bool,        // ayni anda tek ses kaynagi: yeni baslayan kazanir, digeri duraklar (varsayilan KAPALI)
-    pub island_size: String,        // "sm" | "md" | "lg" (varsayilan "md" = mevcut boyut)
-    pub monitor_index: usize,       // 0 = ana ekran, 1.. = diger ekranlar
-    pub recording_dot: bool,        // OBS / Xbox Game Bar kayit gostergesi (kirmizi nokta + sure)
-    pub listening_stats: bool,      // yerel calma gecmisi ve haftalik/gunluk ozet karti
-    pub call_alerts: bool,          // WhatsApp/Telegram/Teams gelen arama karti
-    pub weather: bool,              // hava durumu + yagis uyarisi (IP konumu)
-    pub downloads: bool,            // Steam / tarayici indirme ilerlemesi
-    pub spotify_autoplay: bool,     // Spotify aramadan calinca benzer sarkilari siraya ekle
-    pub easy_mode: bool,            // Basit Mod (varsayilan acik: sade ayarlar)
-    pub scale_mode: String,         // "auto" (Windows olceklemesine uyumlu) | "custom" (ayrik)
-    pub custom_scale: u32,          // 75..=115 (%) ayrik olcek
-    pub auto_dim: bool,             // bostayken hafif saydamlik (varsayilan kapali)
-    pub top_offset: u32,            // 0..=48 px ustten bosluk
-    pub idle_opacity: u32,          // 35..=100 (%) bosta saydamlik
+    // New features: all OFF BY DEFAULT, enabled only from Settings
+    pub show_sys_monitor: bool,     // live system & gaming monitor (CPU/GPU/RAM/network)
+    pub headset_alerts: bool,       // headphones-connected animation + battery percentage
+    pub privacy_dots: bool,         // microphone / camera privacy dots
+    pub audio_switch: bool,         // right-click the speaker icon: switch audio output
+    pub auto_hide_fullscreen: bool, // auto-hide during fullscreen games/videos
+    pub global_shortcut: bool,      // open the island with Ctrl+Shift+Space
+    pub single_source: bool,        // one audio source at a time: the new one wins, the other pauses (default OFF)
+    pub island_size: String,        // "sm" | "md" | "lg" (default "md" = standard size)
+    pub monitor_index: usize,       // 0 = primary display, 1.. = other displays
+    pub recording_dot: bool,        // OBS / Xbox Game Bar recording indicator (red dot + duration)
+    pub listening_stats: bool,      // local play history and weekly/daily summary card
+    pub call_alerts: bool,          // WhatsApp/Telegram/Teams incoming call card
+    pub weather: bool,              // weather + rain alert (IP location)
+    pub downloads: bool,            // Steam / browser download progress
+    pub spotify_autoplay: bool,     // after playing from Spotify search, queue similar tracks
+    pub easy_mode: bool,            // Simple mode (on by default: minimal settings)
+    pub scale_mode: String,         // "auto" (follows Windows scaling) | "custom" (independent)
+    pub custom_scale: u32,          // 75..=115 (%) custom scale
+    pub auto_dim: bool,             // slight transparency while idle (off by default)
+    pub top_offset: u32,            // 0..=48 px top offset
+    pub idle_opacity: u32,          // 35..=100 (%) idle opacity
     pub bg_style: String,           // "pure" | "glass" | "tinted"
-    pub accent_color: String,       // "auto" veya "#rrggbb"
+    pub accent_color: String,       // "auto" or "#rrggbb"
     pub anim_speed: String,         // "snappy" | "normal" | "relaxed"
-    pub clock_24h: bool,            // 24 saat / 12 saat
-    pub gpu_accel: bool,            // WebView2 GPU rasterizasyon & donanim hizlandirma
+    pub clock_24h: bool,            // 24-hour / 12-hour clock
+    pub gpu_accel: bool,            // WebView2 GPU rasterization & hardware acceleration
 }
 
 impl Default for Settings {
@@ -58,7 +58,7 @@ impl Default for Settings {
     }
 }
 
-/// WebView2 baslatilmadan once (AppHandle hazir degilken) gpuAccel ayarini diskten okur
+/// Reads the gpuAccel setting from disk before WebView2 starts (while the AppHandle is not ready yet)
 pub fn gpu_accel_early() -> bool {
     let Ok(appdata) = std::env::var("APPDATA") else { return true };
     let folder = if crate::util::is_test() { "com.island.dynamic-test" } else { "com.island.dynamic" };
@@ -75,7 +75,7 @@ static WAKE_ASYNC: OnceLock<tokio::sync::Notify> = OnceLock::new();
 
 fn async_notify() -> &'static tokio::sync::Notify { WAKE_ASYNC.get_or_init(tokio::sync::Notify::new) }
 
-/// Ozellik kapaliyken is parcasini 0 CPU ile uyutur; ayar degisince aninda uyandirir
+/// Parks the thread at 0 CPU while the feature is off; wakes it immediately when the setting changes
 pub fn wait_until<F: Fn(&Settings) -> bool>(pred: F) {
     let mut g = S.lock().unwrap();
     while !g.as_ref().map(&pred).unwrap_or(false) {
@@ -83,7 +83,7 @@ pub fn wait_until<F: Fn(&Settings) -> bool>(pred: F) {
     }
 }
 
-/// Async gorevler icin 0 CPU bekleme
+/// 0-CPU wait for async tasks
 pub async fn wait_until_async<F: Fn(&Settings) -> bool>(pred: F) {
     loop {
         if pred(&get()) { return; }
@@ -91,7 +91,7 @@ pub async fn wait_until_async<F: Fn(&Settings) -> bool>(pred: F) {
     }
 }
 
-/// Windows arayuz diline gore varsayilan dil kodu
+/// Default language code based on the Windows display language
 fn default_lang() -> String {
     let id = unsafe { windows::Win32::Globalization::GetUserDefaultUILanguage() };
     match id & 0x3FF {
@@ -118,10 +118,10 @@ pub fn init() {
 }
 
 pub fn get() -> Settings { S.lock().unwrap().clone().unwrap_or_default() }
-/// Iki dilli metin
+/// Bilingual text
 pub fn l<'a>(tr: &'a str, en: &'a str) -> &'a str { if get().lang == "tr" { tr } else { en } }
 
-/// Tum desteklenen 12 dil icin menu ve pencere metinleri
+/// Menu and window strings for all 12 supported languages
 pub fn tr(key: &str) -> &'static str {
     let lang = get().lang;
     match (lang.as_str(), key) {
@@ -253,7 +253,7 @@ fn save(s: &Settings) {
     async_notify().notify_waiters();
 }
 
-/// Ayarlar + ayar sayfasinin gosterdigi diger durumlar
+/// Settings plus other state shown by the Settings page
 pub fn snapshot() -> Value {
     let mut v = serde_json::to_value(get()).unwrap_or(json!({}));
     v["autostart"] = json!(crate::winutil::autostart_enabled());
@@ -268,7 +268,7 @@ pub fn snapshot() -> Value {
     v
 }
 
-/// Raf kullanimi degisince ayar sayfasini guncelle (tepsiyi yeniden kurmadan)
+/// Update the Settings page when shelf usage changes (without rebuilding the tray)
 pub fn broadcast_usage() { emit("settings", snapshot()); }
 
 pub fn broadcast() {
@@ -405,7 +405,7 @@ pub fn set_setting(key: String, value: Value) -> Result<Value, String> {
 #[tauri::command]
 pub async fn open_settings(app: AppHandle) { show_window(&app); }
 
-/// Windows'ta pencereyi senkron komut/olay icinde olusturmak ana donguyu kilitler: arka plan gorevinde olustur
+/// On Windows, creating a window inside a synchronous command/event blocks the main loop: create it in a background task
 pub fn show_window(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("settings") {
         let _ = w.unminimize(); let _ = w.show(); let _ = w.set_focus();

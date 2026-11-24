@@ -1,5 +1,5 @@
-// Ses: Core Audio ile seviye/sessiz; dusuk seviye klavye kancasi ile ses tuslarini yakalar
-// (Windows'un kendi ses penceresi cikmaz, gosterge adada gorunur). Program kapaninca tuslar normale doner.
+// Volume: level/mute via Core Audio; a low-level keyboard hook captures the volume keys
+// (the Windows volume flyout is suppressed and the island shows the level instead). Keys return to normal when the app exits.
 use crate::util::emit;
 use serde_json::json;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -39,7 +39,7 @@ fn apply(cmd: &str) -> Result<()> {
         match parts.next().unwrap_or("") {
             "up" | "down" => {
                 let d = if cmd == "up" { 0.02 } else { -0.02 };
-                let n = (((v + d) * 50.0).round() / 50.0).clamp(0.0, 1.0);   // %2 adimlar
+                let n = (((v + d) * 50.0).round() / 50.0).clamp(0.0, 1.0);   // 2% steps
                 ep.SetMasterVolumeLevelScalar(n, std::ptr::null())?;
                 if cmd == "up" { ep.SetMute(false, std::ptr::null())?; }
             }
@@ -76,7 +76,7 @@ pub fn start(hook: bool) {
             tick = tick.wrapping_add(1);
             if let Some((level, muted)) = state() {
                 let cur = (level, muted, KEYS.load(Ordering::Relaxed));
-                // degisince hemen; ayrica 3 sn'de bir tekrar (arayuz gec acilirsa kacirmasin, degisim sayilmaz)
+                // send immediately on change; also resend every 3 s (in case the UI loads late; not counted as a change)
                 if cur != last || tick % 60 == 0 {
                     last = cur;
                     emit("media", json!({ "type": "volume", "level": level, "muted": muted, "keys": cur.2 }));
@@ -98,15 +98,15 @@ unsafe extern "system" fn kb_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> 
     if code >= 0 {
         let kb = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
         let vk = kb.vkCode;
-        if vk == 0xAD || vk == 0xAE || vk == 0xAF {   // sessiz / kis / ac
+        if vk == 0xAD || vk == 0xAE || vk == 0xAF {   // mute / down / up
             let m = wparam.0 as u32;
             if m == WM_KEYDOWN || m == WM_SYSKEYDOWN {
                 KEYS.fetch_add(1, Ordering::Relaxed);
                 send(match vk { 0xAF => "up", 0xAE => "down", _ => "mute" });
             }
-            return LRESULT(1);   // tusu yut -> Windows ses penceresi cikmaz
+            return LRESULT(1);   // swallow the key -> no Windows volume flyout
         }
-        // Global kisayol: Ctrl + Shift + Space (0x20) -> Adayi ac / Spotify aramasi veya raf
+        // Global shortcut: Ctrl + Shift + Space (0x20) -> open the island / Spotify search or shelf
         if vk == 0x20 && (wparam.0 as u32 == WM_KEYDOWN || wparam.0 as u32 == WM_SYSKEYDOWN) {
             let ctrl = (GetAsyncKeyState(VK_CONTROL.0 as i32) as u16 & 0x8000) != 0;
             let shift = (GetAsyncKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000) != 0;
@@ -119,7 +119,7 @@ unsafe extern "system" fn kb_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> 
     CallNextHookEx(None, code, wparam, lparam)
 }
 
-/* ---------- Hizli Ses Cikisi Degistirici (IPolicyConfig COM) ---------- */
+/* ---------- Quick audio output switcher (IPolicyConfig COM) ---------- */
 #[repr(C)]
 struct IPolicyConfigVtbl {
     base: windows::core::IUnknown_Vtbl,
@@ -180,7 +180,7 @@ unsafe fn set_default_audio_device(dev_id: &str) -> bool {
     true
 }
 
-/// Aktif ses cikis cihazlarini (Id, Ad, SeciliMi) listeler
+/// Lists active audio output devices (Id, Name, IsSelected)
 pub fn list_outputs() -> Vec<(String, String, bool)> {
     let mut out = Vec::new();
     unsafe {
@@ -207,7 +207,7 @@ pub fn list_outputs() -> Vec<(String, String, bool)> {
     out
 }
 
-/// Hoparlor <-> Kulaklik arasinda tek tikla gecis yapar, yeni cihazin adini dondurur
+/// One-click switch between speakers <-> headphones; returns the new device's name
 #[tauri::command]
 pub fn switch_audio_output() -> serde_json::Value {
     if !crate::settings::get().audio_switch {

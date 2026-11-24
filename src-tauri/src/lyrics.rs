@@ -1,5 +1,5 @@
-// Sarki sozleri: LRCLIB (lrclib.net). Sadece sarki adi/sanatci/sure gonderilir.
-// Kelime kelime zamanlar (lyricsfile) varsa onlari, yoksa satir zamanlarindan tahmini kelime zamanlarini dondurur.
+// Lyrics: LRCLIB (lrclib.net). Only the track title, artist and duration are sent.
+// Returns word-level timings (lyricsfile) when available, otherwise word timings estimated from line timings.
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -26,7 +26,7 @@ struct Rec {
 #[derive(Deserialize)] struct WLine { text: Option<String>, start_ms: Option<f64>, end_ms: Option<f64>, words: Option<Vec<WWord>> }
 #[derive(Deserialize)] struct WWord { text: Option<serde_yaml::Value>, start_ms: Option<f64>, end_ms: Option<f64> }
 
-/// "Sarki (Remastered) - X Cover" -> "Sarki"
+/// "Song (Remastered) - X Cover" -> "Song"
 fn clean(t: &str) -> String {
     let mut s = String::new();
     let mut depth = 0;
@@ -59,7 +59,7 @@ fn parse_lrc(text: &str) -> Vec<(f64, String)> {
     out
 }
 
-/// Satir suresini harf sayisina gore kelimelere paylastir
+/// Split a line's duration across its words by letter count
 fn estimate_words(lines: &[(f64, String)]) -> Vec<Value> {
     lines.iter().enumerate().map(|(i, (t, text))| {
         let next = lines.get(i + 1).map(|l| l.0).unwrap_or(t + 6.0);
@@ -122,7 +122,7 @@ async fn get(q: &Query) -> Value {
     let key = format!("{}|{}", q.title, q.artist);
     if let Some(v) = CACHE.lock().unwrap().as_ref().and_then(|c| c.get(&key)) { return v.clone(); }
     let tries = [(q.title.clone(), q.artist.clone()), (clean(&q.title), first_artist(&q.artist)), (clean(&q.title), String::new())];
-    // Puan (dusuk = iyi): sure farki + kelime verisi yoksa ceza -> yanlis surumun kelime verisi secilmesin
+    // Score (lower = better): duration difference + penalty when word data is missing -> avoid picking word data from the wrong version
     let score = |x: &Rec| (if q.duration > 0.0 { (x.duration - q.duration).abs() } else { 0.0 })
         + if x.has_word_sync && x.lyricsfile.is_some() { 0.0 } else if x.synced_lyrics.is_some() { 6.0 } else { 1000.0 };
     let mut best: Option<Rec> = None;

@@ -1,4 +1,4 @@
-// Pencere: ust-orta konum, her zaman ustte, odak almama, imlec adanin ustunde degilse tiklama-gecirgen
+// Window: top center, always on top, never takes focus, click-through unless the cursor is over the island
 use crate::Rect;
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::sync::Mutex;
@@ -9,14 +9,14 @@ use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-// Seffaf pencere: en buyuk ada durumu (olcek %115 + ust bosluk 48 px + soz/sira paneli + raf)
-// ve soldaki indirme halkasi sigsin diye. Ada disi alan tiklamalari alttaki uygulamalara gecirir.
+// Transparent window sized for the largest island state (115% scale + 48 px top offset + lyrics/queue panel + shelf)
+// plus the download ring on the left. Clicks outside the island pass through to the apps below.
 pub const W: f64 = 640.0;
 pub const H: f64 = 780.0;
 
 static HWND_RAW: AtomicIsize = AtomicIsize::new(0);
 static RECT_JS: Mutex<Option<Rect>> = Mutex::new(None);
-pub static DRAGGING: AtomicBool = AtomicBool::new(false);   // raftan disari surukleme suruyor
+pub static DRAGGING: AtomicBool = AtomicBool::new(false);   // a drag out of the shelf is in progress
 
 fn hwnd() -> HWND { HWND(HWND_RAW.load(Ordering::Relaxed) as *mut _) }
 
@@ -32,14 +32,14 @@ fn set_noactivate(on: bool) {
     }
 }
 
-/// On plandaki pencere tam ekran bir oyun veya video mu?
+/// Is the foreground window a fullscreen game or video?
 fn is_foreground_fullscreen(mon_x: i32, mon_y: i32, mon_w: i32, mon_h: i32) -> bool {
     unsafe {
         let fg = GetForegroundWindow();
         if fg.0.is_null() || fg == hwnd() {
             return false;
         }
-        // Masaustu (Progman / WorkerW) veya Gorev Cubugu (Shell_TrayWnd) tam ekran sayilmaz
+        // The desktop (Progman / WorkerW) and the taskbar (Shell_TrayWnd) do not count as fullscreen
         let mut cls = [0u16; 64];
         let len = GetClassNameW(fg, &mut cls) as usize;
         let cname = String::from_utf16_lossy(&cls[..len]);
@@ -66,7 +66,7 @@ fn pick_monitor(win: &WebviewWindow) -> Option<tauri::Monitor> {
     win.primary_monitor().ok().flatten()
 }
 
-/// Ayarlar sayfasi icin bagli ekranlarin listesi
+/// List of connected displays for the Settings page
 pub fn list_monitors() -> Vec<serde_json::Value> {
     use tauri::Manager;
     let Some(win) = crate::util::app().get_webview_window("main") else { return vec![] };
@@ -98,7 +98,7 @@ fn place(win: &WebviewWindow) {
     let sf = mon.scale_factor();
     let (mx, my) = (mon.position().x as f64, mon.position().y as f64);
     let (mw, mh) = (mon.size().width as f64, mon.size().height as f64);
-    let (w, h) = ((W * sf).min(mw), (H * sf).min(mh));   // kucuk ekranlarda ekrani asma
+    let (w, h) = ((W * sf).min(mw), (H * sf).min(mh));   // never larger than the screen on small displays
     let y = if crate::util::is_test() { my + (mh - h) / 2.0 } else { my };
     let _ = win.set_size(PhysicalSize::new(w.round() as u32, h.round() as u32));
     let _ = win.set_position(PhysicalPosition::new((mx + (mw - w) / 2.0).round() as i32, y.round() as i32));
@@ -110,7 +110,7 @@ pub fn setup(win: &WebviewWindow) {
     place(win);
     let _ = win.set_ignore_cursor_events(true);
 
-    // Ekran degisince yeniden konumlan + periyodik olarak en uste getir + tam ekran oyun/video kontrolu
+    // Reposition when displays change + periodically bring to top + fullscreen game/video check
     let w2 = win.clone();
     std::thread::spawn(move || {
         let mut last = (0u32, 0u32, usize::MAX);
@@ -126,7 +126,7 @@ pub fn setup(win: &WebviewWindow) {
                 mon_rect = (m.position().x, m.position().y, cur.0 as i32, cur.1 as i32);
                 if cur != last { last = cur; place(&w2); }
             }
-            // Tam ekran oyun veya videoda otomatik gizleme (fare en uste degdiginde geri iner)
+            // Auto-hide during fullscreen games or videos (slides back down when the mouse touches the top edge)
             let auto_hide = crate::settings::get().auto_hide_fullscreen;
             let fs = auto_hide && is_foreground_fullscreen(mon_rect.0, mon_rect.1, mon_rect.2, mon_rect.3);
             let top_peek = unsafe {
@@ -150,9 +150,9 @@ pub fn setup(win: &WebviewWindow) {
         }
     });
 
-    // Imlec adanin ustunde mi? Degilse pencere tiklamalari alttaki uygulamalara gecirir.
-    // Ayrica sol fare tusu basili tutulup surukleme yapilirken adanin yakinina gelindiginde
-    // pencere onceden etkilesimli hale gelir; boylece OLE DragEnter hic kacirilmaz ("kaydirmaz mat").
+    // Is the cursor over the island? If not, window clicks pass through to the apps below.
+    // Also, while the left button is held and a drag approaches the island,
+    // the window becomes interactive in advance, so OLE DragEnter is never missed.
     let w3 = win.clone();
     std::thread::spawn(move || {
         let mut interactive = false;
@@ -197,7 +197,7 @@ pub fn setup(win: &WebviewWindow) {
                             ldown_start = Some((pt.x, pt.y, !interactive));
                         }
 
-                        // Disaridan surukleme yapilirken adanin genis yakalama bolgesi (520x180)
+                        // Large capture area around the island (520x180) while dragging in from outside
                         let in_drop_zone = ext_dragging && x >= 40.0 && x <= 560.0 && y >= -12.0 && y <= 180.0;
                         if in_drop_zone { was_in_drop = true; }
                         let grace = drop_grace.map(|t| std::time::Instant::now() < t).unwrap_or(false);
@@ -223,7 +223,7 @@ pub fn setup(win: &WebviewWindow) {
     });
 }
 
-/// Arama kutusu icin gecici klavye odagi
+/// Temporary keyboard focus for the search box
 pub fn kbd_focus(win: &WebviewWindow, on: bool) {
     if on {
         set_noactivate(false);
@@ -234,20 +234,20 @@ pub fn kbd_focus(win: &WebviewWindow, on: bool) {
     }
 }
 
-/* ---------- tek kopya ---------- */
+/* ---------- single instance ---------- */
 pub fn single_instance() -> bool {
     use windows::core::w;
     use windows::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
     use windows::Win32::System::Threading::CreateMutexW;
     unsafe {
         let h = CreateMutexW(None, true, w!("Local\\DynamicIslandTauri"));
-        // tutamac surec boyunca acik kalsin
+        // keep the handle open for the lifetime of the process
         std::mem::forget(h);
         GetLastError() != ERROR_ALREADY_EXISTS
     }
 }
 
-/* ---------- Windows ile baslat ---------- */
+/* ---------- start with Windows ---------- */
 const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 const RUN_NAME: &str = "DynamicIsland";
 

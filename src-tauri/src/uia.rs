@@ -1,5 +1,5 @@
-// UI Automation: Windows medya arayuzunun desteklemedigi islemler icin uygulamanin kendi kontrollerine ulasir.
-// Apple Music (Windows) sarma iznini SMTC'ye vermiyor; ama ilerleme cubugu ("LCDScrubber") yazilabilir.
+// UI Automation: reaches an app's own controls for actions the Windows media interface does not support.
+// Apple Music (Windows) does not allow seeking through SMTC, but its progress bar ("LCDScrubber") is writable.
 use windows::core::{Result, BSTR};
 use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
 use windows::Win32::System::Variant::VARIANT;
